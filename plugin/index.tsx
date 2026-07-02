@@ -739,6 +739,11 @@ const BUTTON_CSS = `
     margin: 0;
     width: 100%;
     box-sizing: border-box;
+    animation: vsi-row-in 0.32s cubic-bezier(.16,.84,.44,1) both;
+}
+@keyframes vsi-row-in {
+    from { opacity: 0; transform: translateY(-6px); }
+    to   { opacity: 1; transform: translateY(0); }
 }
 .vsi-trade-row > .vsi-trade-btn { min-width: 0; flex: 1 1 0; }
 .vsi-trade-row > .vsi-trade-main { flex: 5 1 0; }
@@ -1379,7 +1384,13 @@ const linkStyle: React.CSSProperties = {
 };
 
 const AboutComponent: React.FC = () => {
-    const tradeUrlSet = !!settings.store.tradeUrl?.trim();
+    // Reactive — re-renders when any of these settings change so the CTA card, publish state, etc
+    // update the instant the user pastes their trade URL (no waiting for the 15-second poll).
+    const s = settings.use(["tradeUrl", "shareViaCloud", "shareTradeUrl", "shareSteamProfile"]);
+    const tradeUrlSet = !!s.tradeUrl?.trim();
+    React.useEffect(() => {
+        publishSharedProfile().catch(() => { });
+    }, [s.tradeUrl, s.shareViaCloud, s.shareTradeUrl, s.shareSteamProfile]);
     return (<>
     <div style={{
         position: "relative",
@@ -1497,8 +1508,10 @@ export default definePlugin({
         // Publish shared profile to the vsi-share worker (if user has cloud share on).
         // Non-blocking — fire-and-forget with a short delay so it doesn't race Vencord's boot.
         publishTimeout = setTimeout(() => { publishSharedProfile().catch(e => console.warn("[VSI] initial publish", e)); }, 5000);
-        // Also re-publish every 15 minutes so setting changes propagate without a Discord restart.
-        publishInterval = setInterval(() => { publishSharedProfile().catch(() => {}); }, 15 * 60 * 1000);
+        // Poll every 15 seconds; publishSharedProfile dedupes via lastPublishHash so identical
+        // state is a cheap no-op. This means pasting a trade URL in settings publishes within 15s
+        // even without a plugin reload.
+        publishInterval = setInterval(() => { publishSharedProfile().catch(() => {}); }, 15 * 1000);
 
         // Prompt for trade URL on first run (once) so users know cloud share needs it.
         maybePromptForTradeUrl().catch(() => {});
