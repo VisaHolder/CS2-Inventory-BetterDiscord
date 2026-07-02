@@ -1,0 +1,10 @@
+name = "vsi-share"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# Fill these before `wrangler deploy`:
+# account_id = "YOUR_ACCOUNT_ID"
+
+[[kv_namespaces]]
+binding = "PROFILES"
+id = "YOUR_KV_NAMESPACE_ID"
