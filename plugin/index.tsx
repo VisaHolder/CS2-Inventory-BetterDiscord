@@ -739,6 +739,10 @@ const BUTTON_CSS = `
     margin: 0;
     width: 100%;
     box-sizing: border-box;
+}
+/* Only rows added from an async network fetch get the slide-in; sync (cache-hit) rows
+   are rendered as `.vsi-trade-row.instant` and skip the animation entirely. */
+.vsi-trade-row:not(.instant) {
     animation: vsi-row-in 0.32s cubic-bezier(.16,.84,.44,1) both;
 }
 @keyframes vsi-row-in {
@@ -1278,28 +1282,63 @@ function tryInject(panel: HTMLElement) {
     const btn = buildButton(shownId, isOwn, wantTradeRow, wantCard);
     target.parent.insertBefore(btn, target.before);
 
-    // Async: for foreign users, resolve trade URL + Steam ID from three sources:
-    // 1. Cloud share (vsi-share worker) — HIGHEST priority (user explicitly opted in)
+    // For foreign users, resolve trade URL + Steam ID from three sources:
+    // 1. Cloud share (vsi-share worker) — HIGHEST priority
     // 2. Bio scrape (steamcommunity.com/tradeoffer/new/ URL in About Me)
-    // 3. Discord's own Steam connection (for Steam profile URL fallback)
-    // Merge with priority 1 > 2 > 3.
+    // 3. Discord's own Steam connection (Steam profile URL fallback)
+    // Priority 1 > 2 > 3. Check caches synchronously first for an instant no-flash render,
+    // fall back to async fetch (with fade-in) only on cache miss.
     if (!isOwn) {
-        (async () => {
-            const [bioTradeUrl, discordSteamId, cloud] = await Promise.all([
-                getTradeUrlForUser(shownId).catch(e => { console.warn("[VSI] getTradeUrlForUser threw", e); return null as string | null; }),
-                getSteamId(shownId).catch(e => { console.warn("[VSI] getSteamId threw", e); return null as string | null; }),
-                getCloudSharedProfile(shownId).catch(e => { console.warn("[VSI] cloud fetch threw", e); return null; }),
-            ]);
-            const tradeUrl = cloud?.trade_url ?? bioTradeUrl;
-            const steamId = cloud?.steam_id ?? discordSteamId;
-            if (!tradeUrl && !steamId) return;
-            if (!btn.isConnected) return;
-            if (btn.querySelector(".vsi-trade-row")) return;
-            const row = buildForeignRow(tradeUrl, steamId);
-            if (!row) return;
-            btn.insertBefore(row, btn.firstChild);
-        })().catch(e => console.error("[VSI] foreign row outer", e));
+        const sync = resolveForeignSync(shownId);
+        if (sync) {
+            const row = buildForeignRow(sync.tradeUrl, sync.steamId);
+            if (row) {
+                row.classList.add("instant"); // skip fade — this was cache-hit, no delay to soften
+                btn.insertBefore(row, btn.firstChild);
+            }
+        } else {
+            (async () => {
+                const [bioTradeUrl, discordSteamId, cloud] = await Promise.all([
+                    getTradeUrlForUser(shownId).catch(e => { console.warn("[VSI] getTradeUrlForUser threw", e); return null as string | null; }),
+                    getSteamId(shownId).catch(e => { console.warn("[VSI] getSteamId threw", e); return null as string | null; }),
+                    getCloudSharedProfile(shownId).catch(e => { console.warn("[VSI] cloud fetch threw", e); return null; }),
+                ]);
+                const tradeUrl = cloud?.trade_url ?? bioTradeUrl;
+                const steamId = cloud?.steam_id ?? discordSteamId;
+                if (!tradeUrl && !steamId) return;
+                if (!btn.isConnected) return;
+                if (btn.querySelector(".vsi-trade-row")) return;
+                const row = buildForeignRow(tradeUrl, steamId);
+                if (!row) return;
+                btn.insertBefore(row, btn.firstChild); // no .instant class → animation runs
+            })().catch(e => console.error("[VSI] foreign row outer", e));
+        }
     }
+}
+
+/**
+ * Fully synchronous resolution: only returns something when the cloud fetch AND (bio or Steam)
+ * are already cached in memory. Anything requiring a network round-trip returns null so the
+ * caller falls back to the async path (which fades in when data arrives).
+ */
+function resolveForeignSync(shownId: string): { tradeUrl: string | null; steamId: string | null } | null {
+    const cloudTtl = 5 * 60_000;
+    const cacheHit = cloudProfileCache.get(shownId);
+    const cloudFresh = cacheHit && Date.now() - cacheHit.ts < cloudTtl;
+    if (!cloudFresh) return null; // cloud never checked or stale → async
+
+    const cloud = cacheHit!.data;
+    const profile: any = UserProfileStore.getUserProfile(shownId);
+    const accounts = profile?.connectedAccounts || profile?.connected_accounts || [];
+    const discordSteamId = accounts.find((c: any) => c?.type === "steam" || c?.type === "STEAM")?.id ?? null;
+    const bioText = profile?.bio ?? profile?.userProfile?.bio ?? profile?.user_profile?.bio;
+    const bioTradeUrl = extractTradeUrl(bioText ?? null);
+
+    const tradeUrl = cloud?.trade_url ?? bioTradeUrl;
+    const steamId = cloud?.steam_id ?? discordSteamId;
+    if (!tradeUrl && !steamId) return null; // nothing to show — skip render entirely
+
+    return { tradeUrl, steamId };
 }
 
 function buildForeignRow(tradeUrl: string | null, steamId: string | null): HTMLElement | null {
