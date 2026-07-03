@@ -165,40 +165,6 @@ async function resolveSteamRef(input: string): Promise<SteamProfile | null> {
     }
 }
 
-// Section headers rendered inline in the settings list. Vencord treats OptionType.COMPONENT
-// entries as pure UI so they don't persist any value.
-const sectionStyle: React.CSSProperties = {
-    marginTop: 22,
-    marginBottom: 6,
-    paddingBottom: 8,
-    borderBottom: "1px solid var(--background-modifier-accent, rgba(255,255,255,.08))",
-};
-const sectionTitleStyle: React.CSSProperties = {
-    fontSize: 11,
-    fontWeight: 800,
-    letterSpacing: 0.8,
-    color: "var(--text-muted, #949ba4)",
-    textTransform: "uppercase",
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-};
-const sectionSubStyle: React.CSSProperties = {
-    fontSize: 12,
-    color: "var(--text-muted, #949ba4)",
-    marginTop: 3,
-    lineHeight: 1.4,
-};
-
-function Section({ icon, title, subtitle }: { icon: string; title: string; subtitle: string }) {
-    return (
-        <div style={sectionStyle}>
-            <div style={sectionTitleStyle}><span style={{ fontSize: 14 }}>{icon}</span>{title}</div>
-            <div style={sectionSubStyle}>{subtitle}</div>
-        </div>
-    );
-}
-
 const settings = definePluginSettings({
     tradeUrl: {
         type: OptionType.STRING,
@@ -1526,7 +1492,7 @@ const AboutComponent: React.FC = () => {
 export default definePlugin({
     name: "SteamInventoryValue",
     description: "Look up a Discord user's CS2 inventory value via their linked Steam (CSFloat prices), and show a Trade Offer button on your own profile.",
-    authors: [{ name: "VisaHolder", id: 0n }],
+    authors: [{ name: "VisaHolder", id: 143883003448393728n }],
     settings,
     settingsAboutComponent: AboutComponent,
 
