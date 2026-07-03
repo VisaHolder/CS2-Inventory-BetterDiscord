@@ -16,13 +16,13 @@ import { Forms, MessageActions, React, RestAPI, UserProfileStore, UserStore } fr
 // Route all external calls through Vencord's native (Electron main-process) helper, which is CSP-free.
 const Native = (window as any).VencordNative?.pluginHelpers?.SteamInventoryValue as typeof import("./native") | undefined;
 
-async function fetchJson(url: string, opts?: { method?: string; body?: any }): Promise<any> {
+async function fetchJson(url: string, opts?: { method?: string; body?: any; headers?: Record<string, string> }): Promise<any> {
     const bodyStr = opts?.body != null ? JSON.stringify(opts.body) : undefined;
-    if (Native?.fetchJson) return await Native.fetchJson(url, { method: opts?.method, body: bodyStr });
+    if (Native?.fetchJson) return await Native.fetchJson(url, { method: opts?.method, body: bodyStr, headers: opts?.headers });
     // Fallback: renderer fetch — will fail for CSP-blocked hosts but worth a shot for whitelisted ones.
     const res = await fetch(url, {
         method: opts?.method || "GET",
-        headers: bodyStr ? { "Content-Type": "application/json" } : undefined,
+        headers: { ...(bodyStr ? { "Content-Type": "application/json" } : {}), ...(opts?.headers ?? {}) },
         body: bodyStr,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
@@ -259,6 +259,12 @@ const settings = definePluginSettings({
         description: "When on: after the bulk lookup, hit live Steam Market for anything the bulk feed missed (stickered/nametagged skins). Complete numbers but adds ~2s per missing item.",
         default: false,
     },
+    csfloatApiKey: {
+        type: OptionType.STRING,
+        description: "Optional CSFloat API key (csfloat.com → Profile → Developer). When set, Doppler & Gamma Doppler knives are priced by their actual phase (Ruby/Sapphire/Black Pearl/Phase 1-4) instead of the generic blended price. Leave blank for generic prices.",
+        default: "",
+        placeholder: "CSFloat API key",
+    },
 
     // ── Profile card behavior ───────────────────────────────────────────────
     showPriceChange: {
@@ -370,9 +376,9 @@ async function loadCsfloatBulk(): Promise<PriceMap> {
 }
 
 async function loadSkinportBulk(): Promise<PriceMap> {
-    const cur = currencyCode(settings.store.marketCurrency || 1);
     const kind = settings.store.skinportPriceKind || "suggested_price";
-    const url = `https://api.skinport.com/v1/items?app_id=730&currency=${cur}&tradable=0`;
+    // Fetch in USD; getBulkPrices applies the FX conversion so every bulk source shares one path.
+    const url = `https://api.skinport.com/v1/items?app_id=730&currency=USD&tradable=0`;
     const arr: any[] = await fetchJson(url);
     const map: PriceMap = new Map();
     for (const it of arr) {
@@ -383,6 +389,26 @@ async function loadSkinportBulk(): Promise<PriceMap> {
     return map;
 }
 
+// USD→currency FX rate, cached 6h. Free, no-key endpoint. The bulk feeds (CSFloat, Skinport)
+// are priced in USD, so we convert to the user's currency exactly the way CSFloat's own website
+// does — a live FX multiply. Steam live-market prices are already native, so they skip this.
+let fxCache: { code: string; rate: number; ts: number } | null = null;
+async function getUsdRate(targetCode: string): Promise<number> {
+    if (targetCode === "USD") return 1;
+    if (fxCache && fxCache.code === targetCode && Date.now() - fxCache.ts < 6 * 3_600_000) return fxCache.rate;
+    try {
+        const data: any = await fetchJson("https://open.er-api.com/v6/latest/USD");
+        const rate = data?.rates?.[targetCode];
+        if (typeof rate === "number" && rate > 0) {
+            fxCache = { code: targetCode, rate, ts: Date.now() };
+            return rate;
+        }
+    } catch (e) {
+        console.warn("[VSI] FX rate fetch failed, prices will show in USD", e);
+    }
+    return fxCache?.code === targetCode ? fxCache.rate : 1;
+}
+
 async function getBulkPrices(source: string): Promise<PriceMap> {
     const cur = settings.store.marketCurrency || 1;
     const kind = settings.store.skinportPriceKind || "suggested_price";
@@ -391,10 +417,20 @@ async function getBulkPrices(source: string): Promise<PriceMap> {
     if (bulkCache && bulkCache.key === key && Date.now() - bulkCache.ts < ttl) {
         return bulkCache.prices;
     }
-    const t0 = Date.now();
     let prices: PriceMap = new Map();
     if (source === "csfloat") prices = await loadCsfloatBulk();
     else if (source === "skinport") prices = await loadSkinportBulk();
+
+    // Both bulk feeds are USD-denominated — convert to the user's chosen currency.
+    const targetCode = currencyCode(cur);
+    if (targetCode !== "USD" && prices.size) {
+        const rate = await getUsdRate(targetCode);
+        if (rate > 0 && rate !== 1) {
+            const conv: PriceMap = new Map();
+            for (const [k, v] of prices) conv.set(k, v * rate);
+            prices = conv;
+        }
+    }
     bulkCache = { key, prices, ts: Date.now() };
     return prices;
 }
@@ -457,34 +493,129 @@ interface PricingOptions {
     onProgress?: (done: number, total: number) => void;
 }
 
+// ── Doppler / Gamma Doppler phase pricing ──────────────────────────────────────
+// Steam gives every Doppler the same market_hash_name, so the phase (Ruby, Sapphire,
+// Black Pearl, Emerald, Phase 1-4) is invisible in the item name — and phases differ
+// wildly in value (a Ruby is worth 10x a Phase 3). The item's `icon_url` DOES differ
+// per phase, so we map icon_url → phase using the community ByMykel dataset. Phase-
+// specific prices then come from CSFloat's authenticated listings API (the user's
+// free API key); without a key we fall back to the generic blended price.
+interface PhaseInfo { phase: string; paintIndex: number }
+let dopplerIconMap: Map<string, PhaseInfo> | null = null;
+let dopplerMapPromise: Promise<Map<string, PhaseInfo>> | null = null;
+async function getDopplerIconMap(): Promise<Map<string, PhaseInfo>> {
+    if (dopplerIconMap) return dopplerIconMap;
+    if (!dopplerMapPromise) {
+        dopplerMapPromise = (async () => {
+            const map = new Map<string, PhaseInfo>();
+            try {
+                const skins: any[] = await fetchJson("https://raw.githubusercontent.com/ByMykel/CSGO-API/main/public/api/en/skins.json");
+                for (const s of skins) {
+                    if (!s?.phase || !s?.image || s?.paint_index == null) continue;
+                    const hash = String(s.image).split("/economy/image/")[1]?.split("/")[0];
+                    if (hash) map.set(hash, { phase: s.phase, paintIndex: Number(s.paint_index) });
+                }
+            } catch (e) {
+                console.warn("[VSI] Doppler phase map fetch failed — Dopplers will use generic prices", e);
+            }
+            dopplerIconMap = map;
+            return map;
+        })();
+    }
+    return dopplerMapPromise;
+}
+const isDopplerName = (name: string): boolean => /\bDoppler\b/i.test(name); // "Doppler" and "Gamma Doppler"
+
+// CSFloat authenticated phase-specific lowest price (USD → user currency). Cached like the bulk feed.
+// We filter by paint_index (the exact phase) — sorting the generic name by price would only ever
+// surface the cheapest phases, never the user's Phase 2 / Ruby / Sapphire / Black Pearl.
+const phasePriceCache = new Map<string, { price: number; ts: number }>();
+async function getCsfloatPhasePrice(marketHashName: string, paintIndex: number): Promise<number | null> {
+    const apiKey = (settings.store.csfloatApiKey || "").trim();
+    if (!apiKey) return null;
+    const cur = settings.store.marketCurrency || 1;
+    const cacheKey = `${marketHashName}::${paintIndex}::${cur}`;
+    const ttl = (settings.store.priceCacheMinutes || 60) * 60_000;
+    const hit = phasePriceCache.get(cacheKey);
+    if (hit && Date.now() - hit.ts < ttl) return hit.price;
+    try {
+        const url = `https://csfloat.com/api/v1/listings?sort_by=lowest_price&limit=1&market_hash_name=${encodeURIComponent(marketHashName)}&paint_index=${paintIndex}`;
+        const resp: any = await fetchJson(url, { headers: { Authorization: apiKey } });
+        const list: any[] = Array.isArray(resp) ? resp : (resp?.data ?? []);
+        const cents = list[0]?.price;
+        if (typeof cents !== "number" || cents <= 0) return null;
+        let price = cents / 100; // CSFloat prices are USD cents
+        const targetCode = currencyCode(cur);
+        if (targetCode !== "USD") { const r = await getUsdRate(targetCode); if (r > 0) price *= r; }
+        phasePriceCache.set(cacheKey, { price, ts: Date.now() });
+        return price;
+    } catch (e) {
+        console.warn("[VSI] CSFloat phase price failed for", marketHashName, paintIndex, e);
+        return null;
+    }
+}
+
 async function loadInventory(steamId: string, opts: PricingOptions): Promise<InventoryResult> {
-    // Steam rejects count>=some threshold with HTTP 400. Omitting count returns the full inventory.
-    const invUrl = `https://steamcommunity.com/inventory/${steamId}/730/2?l=english`;
     const empty = (isPriv: boolean): InventoryResult => ({
         total: 0, priced: 0, count: 0, marketableCount: 0, uniqueNames: 0, isPrivate: isPriv, topItems: [], unpriced: [], skippedNonMarketable: 0,
     });
-    let inv: any;
+
+    // Steam's inventory endpoint PAGINATES. Without an explicit count it returns only a partial
+    // first page (~a few hundred items) with `more_items: 1` — so large inventories silently lose
+    // everything past that page (knives, gloves, and any newly-added item can land off-page).
+    // We must pass count=2000 (Valve's per-request max; higher 400s) AND follow the `last_assetid`
+    // cursor until the inventory is exhausted.
+    const base = `https://steamcommunity.com/inventory/${steamId}/730/2?l=english&count=2000`;
+    const assets: any[] = [];
+    const descriptions: any[] = [];
+    const seenDesc = new Set<string>();
+    let startAssetId: string | undefined;
+    let pages = 0;
     try {
-        inv = await fetchJson(invUrl);
+        do {
+            const url = startAssetId ? `${base}&start_assetid=${startAssetId}` : base;
+            const page: any = await fetchJson(url);
+            if (!page?.assets || !page?.descriptions) {
+                if (pages === 0) return empty(true); // first page blocked → private / no CS2 inventory
+                break;
+            }
+            assets.push(...page.assets);
+            for (const d of page.descriptions) {
+                const k = `${d.classid}_${d.instanceid}`;
+                if (!seenDesc.has(k)) { seenDesc.add(k); descriptions.push(d); }
+            }
+            startAssetId = page.more_items ? String(page.last_assetid) : undefined;
+            pages++;
+            if (startAssetId) await sleep(600); // be gentle — Steam rate-limits inventory requests
+        } while (startAssetId && pages < 8);
     } catch (e: any) {
         if (String(e?.message || e).includes("403")) return empty(true);
-        throw e;
+        if (assets.length === 0) throw e; // nothing fetched → surface the error; else price partial
     }
-    if (!inv?.assets || !inv?.descriptions) return empty(true);
+    if (assets.length === 0) return empty(true);
+    const inv = { assets, descriptions };
 
     // Steam's `marketable` (0/1) tells us if the item can even be listed on the Market.
     // Medals, service coins, achievement badges, non-tradeable capsules etc. have marketable=0.
     // We skip those entirely — otherwise we'd hit CSFloat/Steam for nothing and pad the "missing" list.
-    interface Meta { name: string; marketable: boolean }
+    // For Dopplers we also resolve the phase from the icon so a Ruby isn't priced as a Phase 3.
+    const dopMap = await getDopplerIconMap();
+    interface Meta { name: string; marketable: boolean; phase: string | null; paintIndex: number | null }
     const metaByKey = new Map<string, Meta>();
     for (const d of inv.descriptions) {
+        const name = d.market_hash_name;
+        const dp = (isDopplerName(name) && d.icon_url) ? (dopMap.get(d.icon_url) ?? null) : null;
         metaByKey.set(`${d.classid}_${d.instanceid}`, {
-            name: d.market_hash_name,
+            name,
             marketable: d.marketable === 1 || d.marketable === "1",
+            phase: dp?.phase ?? null,
+            paintIndex: dp?.paintIndex ?? null,
         });
     }
 
-    const countByName = new Map<string, number>();
+    // Group identical items. Dopplers group by name+phase so each phase is counted & priced on its own.
+    interface Group { name: string; phase: string | null; paintIndex: number | null; qty: number }
+    const groups = new Map<string, Group>();
     let marketableCount = 0;
     let skippedNonMarketable = 0;
     for (const a of inv.assets) {
@@ -492,14 +623,16 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
         if (!meta) continue;
         if (!meta.marketable) { skippedNonMarketable++; continue; }
         marketableCount++;
-        countByName.set(meta.name, (countByName.get(meta.name) ?? 0) + 1);
+        const gk = meta.phase ? `${meta.name}::${meta.phase}` : meta.name;
+        const g = groups.get(gk);
+        if (g) g.qty++;
+        else groups.set(gk, { name: meta.name, phase: meta.phase, paintIndex: meta.paintIndex, qty: 1 });
     }
-    const uniqueNames = [...countByName.keys()];
+    const uniqueNames = [...new Set([...groups.values()].map(g => g.name))];
 
+    // ── Generic (name-keyed) pricing: bulk feed first, live Steam Market for the misses. ──
     const priceByName = new Map<string, number>();
     const misses: string[] = [];
-
-    // Stage 1: bulk lookup (instant) if source is a bulk feed.
     if (opts.source !== "live_steam") {
         const bulk = await getBulkPrices(opts.source);
         for (const name of uniqueNames) {
@@ -508,11 +641,8 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
             else misses.push(name);
         }
     } else {
-        // live_steam: everything goes through per-item Steam Market
         misses.push(...uniqueNames);
     }
-
-    // Stage 2: fill misses via live Steam Market (rate-limited, per-item).
     const shouldRunLive = opts.source === "live_steam" || (opts.useLiveFallback && misses.length > 0);
     if (shouldRunLive && misses.length > 0) {
         const currency = settings.store.marketCurrency || 1;
@@ -530,18 +660,32 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
         }
     }
 
-    // Everything not priced by either stage is unpriced.
+    // ── Per-group pricing. Doppler phases get a phase-specific CSFloat price (if a key is set),
+    //    falling back to the generic name price; everything else uses the generic name price. ──
+    const priceByGroup = new Map<string, number>();
+    const hasKey = !!(settings.store.csfloatApiKey || "").trim();
+    for (const [gk, g] of groups) {
+        let p: number | null = null;
+        if (g.phase && g.paintIndex != null && hasKey) {
+            p = await getCsfloatPhasePrice(g.name, g.paintIndex);
+            await sleep(350); // gentle on CSFloat's API
+        }
+        if (p == null) p = priceByName.get(g.name) ?? null;
+        if (p != null) priceByGroup.set(gk, p);
+    }
+
+    // Everything not priced is unpriced.
     const unpriced: string[] = [];
-    for (const name of uniqueNames) if (!priceByName.has(name)) unpriced.push(name);
+    for (const [gk, g] of groups) if (!priceByGroup.has(gk)) unpriced.push(g.phase ? `${g.name} (${g.phase})` : g.name);
 
     let total = 0, priced = 0;
     const perItem: { name: string; price: number; qty: number }[] = [];
-    for (const [name, qty] of countByName) {
-        const p = priceByName.get(name);
+    for (const [gk, g] of groups) {
+        const p = priceByGroup.get(gk);
         if (p == null) continue;
-        total += p * qty;
-        priced += qty;
-        perItem.push({ name, price: p, qty });
+        total += p * g.qty;
+        priced += g.qty;
+        perItem.push({ name: g.phase ? `${g.name} (${g.phase})` : g.name, price: p, qty: g.qty });
     }
     perItem.sort((a, b) => (b.price * b.qty) - (a.price * a.qty));
     const topItems = perItem.slice(0, 5).map(i => ({ name: i.qty > 1 ? `${i.name} ×${i.qty}` : i.name, price: i.price * i.qty }));
@@ -697,7 +841,7 @@ const BUTTON_CSS = `
     box-sizing: border-box;
 }
 /* Only rows added from an async network fetch get the slide-in; sync (cache-hit) rows
-   are rendered as `.vsi-trade-row.instant` and skip the animation entirely. */
+   are rendered as .vsi-trade-row.instant and skip the animation entirely. */
 .vsi-trade-row:not(.instant) {
     animation: vsi-row-in 0.32s cubic-bezier(.16,.84,.44,1) both;
 }
@@ -837,6 +981,29 @@ const BUTTON_CSS = `
     font-style: italic;
 }
 .vsi-inv-card.stale { opacity: 0.85; }
+
+/* Empty-state "Load inventory" button */
+.vsi-inv-card .vsi-load-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: 100%;
+    margin-top: 6px;
+    padding: 7px 10px;
+    border: none;
+    border-radius: 6px;
+    background: #5865F2;
+    color: #fff;
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background .15s ease, transform .1s ease;
+}
+.vsi-inv-card .vsi-load-btn:hover { background: #4752C4; }
+.vsi-inv-card .vsi-load-btn:active { transform: translateY(1px); }
+.vsi-inv-card .vsi-load-btn svg { flex-shrink: 0; }
+.vsi-inv-card.loading .vsi-load-btn { opacity: .6; pointer-events: none; }
 
 /* Loading skeleton */
 .vsi-skel {
@@ -997,10 +1164,11 @@ function buildButton(shownUserId: string, isOwn: boolean, wantTradeRow: boolean,
                 <span class="vsi-skel vsi-skel-row"></span>
             </div>
         `;
-        // Delegate refresh clicks at the card level so innerHTML rewrites don't kill the handler.
+        // Delegate refresh / load clicks at the card level so innerHTML rewrites don't kill the handler.
         card.addEventListener("click", (e) => {
             const t = e.target as HTMLElement | null;
-            if (t && t.classList && t.classList.contains("vsi-refresh")) {
+            const hit = t?.closest?.(".vsi-refresh, .vsi-load-btn");
+            if (hit) {
                 e.stopPropagation();
                 e.preventDefault();
                 refreshCard(card, shownUserId, isOwn);
@@ -1093,11 +1261,11 @@ async function populateInventoryCard(card: HTMLElement, shownUserId: string, isO
     const snaps = await getSnapshots(steamId);
     const latest = snaps[0];
     if (!latest) {
-        const uname = UserStore.getUser(shownUserId)?.username;
-        const hint = isOwn ? "Run <code>/inventory</code> on yourself." : `Run <code>/inventory @${uname ?? "them"}</code> to build a snapshot.`;
+        const who = isOwn ? "your" : "their";
         card.innerHTML = `
             <div class="vsi-card-header"><span>💼 CS2 Inventory</span></div>
-            <div class="vsi-empty">${hint}</div>
+            <div class="vsi-empty">No snapshot yet — load ${who} CS2 inventory to price it.</div>
+            <button class="vsi-load-btn" type="button">${STEAM_ICON_SVG}<span>Load inventory</span></button>
         `;
         return;
     }

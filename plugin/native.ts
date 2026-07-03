@@ -13,8 +13,8 @@ const BROWSER_HEADERS = {
     "Accept-Encoding": "gzip, deflate, br",
 };
 
-export async function fetchJson(_ev: IpcMainInvokeEvent, url: string, opts?: { method?: string; body?: string }): Promise<any> {
-    const headers: Record<string, string> = { ...BROWSER_HEADERS };
+export async function fetchJson(_ev: IpcMainInvokeEvent, url: string, opts?: { method?: string; body?: string; headers?: Record<string, string> }): Promise<any> {
+    const headers: Record<string, string> = { ...BROWSER_HEADERS, ...(opts?.headers ?? {}) };
     if (opts?.body) headers["Content-Type"] = "application/json";
     const res = await fetch(url, {
         method: opts?.method || "GET",
