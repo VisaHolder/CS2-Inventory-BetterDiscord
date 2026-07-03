@@ -1,3 +1,9 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 VisaHolder
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 import type { IpcMainInvokeEvent } from "electron";
 
 const BROWSER_HEADERS = {

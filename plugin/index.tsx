@@ -1,6 +1,12 @@
+/*
+ * Vencord, a Discord client mod
+ * Copyright (c) 2026 VisaHolder
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+
 import { ApplicationCommandInputType, ApplicationCommandOptionType, sendBotMessage } from "@api/Commands";
 import { addMessagePreSendListener, removeMessagePreSendListener } from "@api/MessageEvents";
-import * as Notices from "@api/Notices";
+import { popNotice, showNotice } from "@api/Notices";
 import { definePluginSettings } from "@api/Settings";
 import definePlugin, { OptionType } from "@utils/types";
 import { DataStore } from "@api/index";
@@ -54,11 +60,11 @@ async function maybePromptForTradeUrl(): Promise<void> {
     // Delay so the notice appears after Vencord finishes booting.
     setTimeout(() => {
         try {
-            Notices.showNotice(
+            showNotice(
                 "💼 Steam Inventory Value: paste your Steam trade URL into the plugin settings to publish it and see friends' trade offers.",
                 "Open Settings",
                 () => {
-                    Notices.popNotice();
+                    popNotice();
                     DataStore.set("vsi.tradePromptShown", true).catch(() => { });
                 },
             );
@@ -194,11 +200,6 @@ function Section({ icon, title, subtitle }: { icon: string; title: string; subti
 }
 
 const settings = definePluginSettings({
-    // ── Your profile ────────────────────────────────────────────────────────
-    header_profile: {
-        type: OptionType.COMPONENT,
-        component: () => <Section icon="👤" title="Your Profile" subtitle="How the Trade / Steam / Inventory buttons appear on your own Discord popout." />,
-    },
     tradeUrl: {
         type: OptionType.STRING,
         description: "Your Steam trade offer URL. Grab it from steamcommunity.com/my/tradeoffers/privacy — this is what the Trade button opens.",
@@ -228,10 +229,6 @@ const settings = definePluginSettings({
     },
 
     // ── Sharing ─────────────────────────────────────────────────────────────
-    header_share: {
-        type: OptionType.COMPONENT,
-        component: () => <Section icon="☁️" title="Sharing" subtitle="Publish your trade URL to the vsi-share cloud so friends running the plugin see it on your popout." />,
-    },
     shareViaCloud: {
         type: OptionType.BOOLEAN,
         description: "Publish your data to the vsi-share cloud. Requires a Trade URL set above.",
@@ -255,10 +252,6 @@ const settings = definePluginSettings({
     },
 
     // ── Prices ──────────────────────────────────────────────────────────────
-    header_prices: {
-        type: OptionType.COMPONENT,
-        component: () => <Section icon="💰" title="Prices" subtitle="Which marketplace to price your items from. CSFloat is fastest and usually accurate to within a few percent." />,
-    },
     priceSource: {
         type: OptionType.SELECT,
         description: "Which marketplace's prices to use for /inventory.",
@@ -270,16 +263,19 @@ const settings = definePluginSettings({
     },
     marketCurrency: {
         type: OptionType.SELECT,
-        description: "Currency for prices. Skinport only supports USD, GBP, and EUR.",
+        description: "Currency for prices. CSFloat is USD-only under the hood — CSFloat mode ignores this. Steam Market and Skinport respect it.",
         options: [
             { label: "USD ($)", value: 1, default: true },
+            { label: "CAD (C$)", value: 22 },
             { label: "GBP (£)", value: 2 },
             { label: "EUR (€)", value: 3 },
+            { label: "AUD (A$)", value: 23 },
             { label: "CHF", value: 5 },
-            { label: "RUB (₽)", value: 6 },
             { label: "PLN (zł)", value: 7 },
             { label: "BRL (R$)", value: 8 },
             { label: "SGD (S$)", value: 24 },
+            { label: "JPY (¥)", value: 9 },
+            { label: "RUB (₽)", value: 6 },
         ],
     },
     skinportPriceKind: {
@@ -299,10 +295,6 @@ const settings = definePluginSettings({
     },
 
     // ── Profile card behavior ───────────────────────────────────────────────
-    header_card: {
-        type: OptionType.COMPONENT,
-        component: () => <Section icon="📊" title="Inventory Card" subtitle="Behavior of the CS2 Inventory card on profile popouts — deltas, staleness, extras." />,
-    },
     showPriceChange: {
         type: OptionType.BOOLEAN,
         description: "Show a green/red delta chip when the total moved since your last /inventory run.",
@@ -324,11 +316,6 @@ const settings = definePluginSettings({
         default: 24,
     },
 
-    // ── Chat & command behavior ─────────────────────────────────────────────
-    header_chat: {
-        type: OptionType.COMPONENT,
-        component: () => <Section icon="💬" title="Chat & Commands" subtitle="How /inventory and /csinv send their results." />,
-    },
     postPublicly: {
         type: OptionType.BOOLEAN,
         description: "When on: /inventory sends a real message to the channel (markdown, visible to everyone). When off: rich embed only you see.",
@@ -336,10 +323,6 @@ const settings = definePluginSettings({
     },
 
     // ── Advanced ────────────────────────────────────────────────────────────
-    header_advanced: {
-        type: OptionType.COMPONENT,
-        component: () => <Section icon="⚙️" title="Advanced" subtitle="Tuning knobs — you probably don't need to touch these." />,
-    },
     priceCacheMinutes: {
         type: OptionType.NUMBER,
         description: "How long to keep the bulk price feed in memory before refetching. Skinport/CSFloat only refresh hourly on their end so 60 is fine.",
@@ -397,8 +380,12 @@ const priceMemo = new Map<string, { price: number; ts: number }>();
 type PriceMap = Map<string, number>;
 let bulkCache: { key: string; prices: PriceMap; ts: number } | null = null;
 
+// Steam Market currency ID → ISO 4217 code (used for Skinport's `currency=` query param).
 function currencyCode(cur: number): string {
-    return ({ 1: "USD", 2: "GBP", 3: "EUR" } as Record<number, string>)[cur] || "USD";
+    return ({
+        1: "USD", 2: "GBP", 3: "EUR", 5: "CHF", 6: "RUB", 7: "PLN", 8: "BRL",
+        9: "JPY", 22: "CAD", 23: "AUD", 24: "SGD",
+    } as Record<number, string>)[cur] || "USD";
 }
 
 async function loadCsfloatBulk(): Promise<PriceMap> {
@@ -607,7 +594,10 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
 }
 
 function currencySymbol(c: number): string {
-    return ({ 1: "$", 2: "£", 3: "€", 5: "CHF ", 6: "₽", 7: "zł ", 8: "R$", 24: "S$" } as Record<number, string>)[c] || "$";
+    return ({
+        1: "$", 2: "£", 3: "€", 5: "CHF ", 6: "₽", 7: "zł ", 8: "R$",
+        9: "¥", 22: "C$", 23: "A$", 24: "S$",
+    } as Record<number, string>)[c] || "$";
 }
 const fmt = (n: number, cur = 1) => `${currencySymbol(cur)}${n.toFixed(2)}`;
 
