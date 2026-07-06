@@ -1,0 +1,12 @@
+{
+  "name": "steam-inventory-value-bd",
+  "version": "1.0.0",
+  "private": true,
+  "description": "BetterDiscord build of SteamInventoryValue",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0"
+  }
+}
