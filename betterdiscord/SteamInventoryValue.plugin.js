@@ -1406,9 +1406,9 @@ function invMarkdown(displayName, r, cur, steamId, tradeUrl) {
   const body = top.map((i, k) => `${sym}${nums[k].padStart(w)}  ${abbrevItem(i.name)}`).join("\n");
   const untr = (r.skippedNonMarketable ?? 0) > 0 ? ` \xB7 ${r.skippedNonMarketable} untradeable` : "";
   const links = [
-    steamId ? `<https://steamcommunity.com/profiles/${steamId}>` : "",
-    tradeUrl ? `<${tradeUrl}>` : ""
-  ].filter(Boolean).join("  \xB7  ");
+    steamId ? `Steam \xB7 <https://steamcommunity.com/profiles/${steamId}>` : "",
+    tradeUrl ? `Trade \xB7 <${tradeUrl}>` : ""
+  ].filter(Boolean).join("\n-# ");
   return `## ${displayName} \u2014 ${fmt(r.total, cur)}
 -# ${r.priced}/${r.marketableCount ?? r.priced} priced \xB7 ${r.uniqueNames} unique${untr}` + (body ? `
 \`\`\`
@@ -1416,7 +1416,26 @@ ${body}
 \`\`\`` : "") + (links ? `
 -# ${links}` : "");
 }
-async function buildInventoryReply(args) {
+function invEmbed(displayName, r, cur, steamId, tradeUrl) {
+  const sym = currencySymbol(cur);
+  const top = r.topItems ?? [];
+  const nums = top.map((i) => i.price.toFixed(2));
+  const w = nums.reduce((a, s) => Math.max(a, s.length), 0);
+  const body = top.map((i, k) => `${sym}${nums[k].padStart(w)}  ${abbrevItem(i.name)}`).join("\n");
+  const untr = (r.skippedNonMarketable ?? 0) > 0 ? ` \xB7 ${r.skippedNonMarketable} untradeable` : "";
+  const linkParts = [];
+  if (steamId) linkParts.push(`[Steam Profile](https://steamcommunity.com/profiles/${steamId})`);
+  if (tradeUrl) linkParts.push(`[Send Trade Offer](${tradeUrl})`);
+  let description = `${r.priced}/${r.marketableCount ?? r.priced} priced \xB7 ${r.uniqueNames} unique${untr}`;
+  if (body) description += `
+\`\`\`
+${body}
+\`\`\``;
+  if (linkParts.length) description += `
+${linkParts.join("  \xB7  ")}`;
+  return { color: 5793266, title: `${displayName} \u2014 ${fmt(r.total, cur)}`, description };
+}
+async function buildInventoryData(args) {
   const userId = args.find((a) => a.name === "user")?.value;
   const steamRef = String(args.find((a) => a.name === "steam")?.value ?? "").trim();
   let steamId = null;
@@ -1424,26 +1443,26 @@ async function buildInventoryReply(args) {
   if (userId) {
     displayName = UserStore?.getUser?.(userId)?.username ?? "User";
     steamId = await getSteamId(userId).catch(() => null);
-    if (!steamId) return { content: `**${displayName}** has no visible Steam account linked on Discord.` };
+    if (!steamId) return { error: `**${displayName}** has no visible Steam account linked on Discord.` };
   } else if (steamRef) {
     const resolved = await resolveSteamRef(steamRef).catch(() => null);
-    if (!resolved) return { content: `Couldn't resolve **${steamRef}** to a Steam profile. Try a full URL, a vanity, or a raw SteamID64.` };
+    if (!resolved) return { error: `Couldn't resolve **${steamRef}** to a Steam profile. Try a full URL, a vanity, or a raw SteamID64.` };
     steamId = resolved.steamId;
     displayName = resolved.persona ?? `SteamID ${resolved.steamId}`;
   } else {
-    return { content: "Give me a **user** or a **steam** ref (URL / vanity / SteamID64)." };
+    return { error: "Give me a **user** or a **steam** ref (URL / vanity / SteamID64)." };
   }
   const cur = settings.store.marketCurrency || 1;
   const tradeUrl = await cacheGetTradeUrl(steamId) ?? void 0;
   const cached = await cacheGetInventory(steamId, cur);
-  if (cached) return { content: invMarkdown(displayName, cached, cur, steamId, tradeUrl) };
+  if (cached) return { displayName, r: cached, cur, steamId, tradeUrl };
   const validSources = /* @__PURE__ */ new Set(["csfloat", "skinport", "live_steam"]);
   const stored = settings.store.priceSource;
   const source = validSources.has(stored) ? stored : "csfloat";
   const inv = await loadInventory(steamId, { source, useLiveFallback: false });
-  if (inv.isPrivate) return { content: `**${displayName}**'s Steam inventory is private.` };
+  if (inv.isPrivate) return { error: `**${displayName}**'s Steam inventory is private.` };
   cachePushInventory(steamId, { total: inv.total, priced: inv.priced, itemCount: inv.count, marketableCount: inv.marketableCount, uniqueNames: inv.uniqueNames, ts: Date.now(), source, currency: cur, topItems: inv.topItems });
-  return { content: invMarkdown(displayName, inv, cur, steamId, tradeUrl) };
+  return { displayName, r: inv, cur, steamId, tradeUrl };
 }
 function registerCommands() {
   try {
@@ -1457,15 +1476,17 @@ function registerCommands() {
       ],
       execute: async (cmdArgs, ctx) => {
         try {
-          const reply = await buildInventoryReply(cmdArgs ?? []);
+          const d = await buildInventoryData(cmdArgs ?? []);
+          if ("error" in d) return { content: d.error };
           if (settings.store.postPublicly && MessageActions?.sendMessage) {
             const channelId = ctx?.channel?.id ?? SelectedChannelStore?.getChannelId?.();
             if (channelId) {
-              MessageActions.sendMessage(channelId, { content: reply.content, tts: false, invalidEmojis: [], validNonShortcutEmojis: [] }, void 0, { nonce: String(Date.now()) });
+              const content = invMarkdown(d.displayName, d.r, d.cur, d.steamId, d.tradeUrl);
+              MessageActions.sendMessage(channelId, { content, tts: false, invalidEmojis: [], validNonShortcutEmojis: [] }, void 0, { nonce: String(Date.now()) });
               return;
             }
           }
-          return reply;
+          return { embeds: [invEmbed(d.displayName, d.r, d.cur, d.steamId, d.tradeUrl)] };
         } catch (e) {
           console.error("[VSI] /inventory", e);
           return { content: "Error pricing that inventory \u2014 try again in a moment." };

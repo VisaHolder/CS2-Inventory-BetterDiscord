@@ -1610,20 +1610,41 @@ function invMarkdown(displayName: string, r: PricedLike, cur: number, steamId?: 
     const w = nums.reduce((a, s) => Math.max(a, s.length), 0);
     const body = top.map((i, k) => `${sym}${nums[k].padStart(w)}  ${abbrevItem(i.name)}`).join("\n");
     const untr = (r.skippedNonMarketable ?? 0) > 0 ? ` · ${r.skippedNonMarketable} untradeable` : "";
-    // Discord doesn't render masked links in normal user messages, so links are bare
-    // URLs wrapped in <> (clickable, no big embed card). Shown as a small footer line.
+    // Public message: Discord doesn't render masked links for user messages, so links are
+    // labeled bare URLs wrapped in <> (clickable, no big embed card), one per subtext line.
     const links = [
-        steamId ? `<https://steamcommunity.com/profiles/${steamId}>` : "",
-        tradeUrl ? `<${tradeUrl}>` : "",
-    ].filter(Boolean).join("  ·  ");
+        steamId ? `Steam · <https://steamcommunity.com/profiles/${steamId}>` : "",
+        tradeUrl ? `Trade · <${tradeUrl}>` : "",
+    ].filter(Boolean).join("\n-# ");
     return `## ${displayName} — ${fmt(r.total, cur)}\n`
         + `-# ${r.priced}/${r.marketableCount ?? r.priced} priced · ${r.uniqueNames} unique${untr}`
         + (body ? `\n\`\`\`\n${body}\n\`\`\`` : "")
         + (links ? `\n-# ${links}` : "");
 }
 
-// BetterDiscord sends whatever execute returns, so we build the reply and return { content }.
-async function buildInventoryReply(args: any[]): Promise<{ content: string }> {
+// Embed for the ephemeral ("only you") reply — embeds DO render masked links, so the
+// Steam / Trade links become clean clickable words instead of bare URLs.
+function invEmbed(displayName: string, r: PricedLike, cur: number, steamId?: string, tradeUrl?: string): any {
+    const sym = currencySymbol(cur);
+    const top = r.topItems ?? [];
+    const nums = top.map(i => i.price.toFixed(2));
+    const w = nums.reduce((a, s) => Math.max(a, s.length), 0);
+    const body = top.map((i, k) => `${sym}${nums[k].padStart(w)}  ${abbrevItem(i.name)}`).join("\n");
+    const untr = (r.skippedNonMarketable ?? 0) > 0 ? ` · ${r.skippedNonMarketable} untradeable` : "";
+    const linkParts: string[] = [];
+    if (steamId) linkParts.push(`[Steam Profile](https://steamcommunity.com/profiles/${steamId})`);
+    if (tradeUrl) linkParts.push(`[Send Trade Offer](${tradeUrl})`);
+    let description = `${r.priced}/${r.marketableCount ?? r.priced} priced · ${r.uniqueNames} unique${untr}`;
+    if (body) description += `\n\`\`\`\n${body}\n\`\`\``;
+    if (linkParts.length) description += `\n${linkParts.join("  ·  ")}`;
+    return { color: 0x5865F2, title: `${displayName} — ${fmt(r.total, cur)}`, description };
+}
+
+// Resolves + prices an inventory and returns the raw pieces, so execute can render it either
+// as a public markdown message or as an ephemeral embed (clickable links).
+type InvData = { error: string } | { displayName: string; r: PricedLike; cur: number; steamId: string; tradeUrl?: string };
+
+async function buildInventoryData(args: any[]): Promise<InvData> {
     const userId = args.find((a: any) => a.name === "user")?.value as string | undefined;
     const steamRef = String(args.find((a: any) => a.name === "steam")?.value ?? "").trim();
 
@@ -1632,30 +1653,30 @@ async function buildInventoryReply(args: any[]): Promise<{ content: string }> {
     if (userId) {
         displayName = UserStore?.getUser?.(userId)?.username ?? "User";
         steamId = await getSteamId(userId).catch(() => null);
-        if (!steamId) return { content: `**${displayName}** has no visible Steam account linked on Discord.` };
+        if (!steamId) return { error: `**${displayName}** has no visible Steam account linked on Discord.` };
     } else if (steamRef) {
         const resolved = await resolveSteamRef(steamRef).catch(() => null);
-        if (!resolved) return { content: `Couldn't resolve **${steamRef}** to a Steam profile. Try a full URL, a vanity, or a raw SteamID64.` };
+        if (!resolved) return { error: `Couldn't resolve **${steamRef}** to a Steam profile. Try a full URL, a vanity, or a raw SteamID64.` };
         steamId = resolved.steamId;
         displayName = resolved.persona ?? `SteamID ${resolved.steamId}`;
     } else {
-        return { content: "Give me a **user** or a **steam** ref (URL / vanity / SteamID64)." };
+        return { error: "Give me a **user** or a **steam** ref (URL / vanity / SteamID64)." };
     }
 
     const cur = settings.store.marketCurrency || 1;
-    // Owner-published trade URL from the shared cache (null if they never set one).
+    // Owner-published trade URL from the shared cache (undefined if they never set one).
     const tradeUrl = (await cacheGetTradeUrl(steamId)) ?? undefined;
     // Cache-first for speed; else price via CSFloat (the slow live fallback is skipped in commands).
     const cached = await cacheGetInventory(steamId, cur);
-    if (cached) return { content: invMarkdown(displayName, cached, cur, steamId, tradeUrl) };
+    if (cached) return { displayName, r: cached, cur, steamId, tradeUrl };
 
     const validSources = new Set(["csfloat", "skinport", "live_steam"]);
     const stored = settings.store.priceSource as string;
     const source = validSources.has(stored) ? stored : "csfloat";
     const inv = await loadInventory(steamId, { source, useLiveFallback: false });
-    if (inv.isPrivate) return { content: `**${displayName}**'s Steam inventory is private.` };
+    if (inv.isPrivate) return { error: `**${displayName}**'s Steam inventory is private.` };
     cachePushInventory(steamId, { total: inv.total, priced: inv.priced, itemCount: inv.count, marketableCount: inv.marketableCount, uniqueNames: inv.uniqueNames, ts: Date.now(), source, currency: cur, topItems: inv.topItems });
-    return { content: invMarkdown(displayName, inv, cur, steamId, tradeUrl) };
+    return { displayName, r: inv, cur, steamId, tradeUrl };
 }
 
 function registerCommands(): void {
@@ -1670,20 +1691,21 @@ function registerCommands(): void {
             ],
             execute: async (cmdArgs: any[], ctx: any) => {
                 try {
-                    const reply = await buildInventoryReply(cmdArgs ?? []);
-                    // "Post Publicly" ON → actually send the message so everyone in the channel sees it.
-                    // OFF → return it, which BetterDiscord renders as an ephemeral "only you can see this".
-                    // "Post Publicly" ON → send a real message everyone sees. Discord silently drops a
-                    // sendMessage without a nonce, so one is always supplied. OFF (or no channel/module)
-                    // → return the content, which BetterDiscord renders as an ephemeral "only you" message.
+                    const d = await buildInventoryData(cmdArgs ?? []);
+                    if ("error" in d) return { content: d.error };
+                    // "Post Publicly" ON → send a real message everyone sees (labeled bare URLs, since
+                    // Discord won't render masked links in user messages). Discord silently drops a
+                    // sendMessage without a nonce, so one is always supplied.
                     if (settings.store.postPublicly && MessageActions?.sendMessage) {
                         const channelId = ctx?.channel?.id ?? SelectedChannelStore?.getChannelId?.();
                         if (channelId) {
-                            MessageActions.sendMessage(channelId, { content: reply.content, tts: false, invalidEmojis: [], validNonShortcutEmojis: [] }, undefined, { nonce: String(Date.now()) });
+                            const content = invMarkdown(d.displayName, d.r, d.cur, d.steamId, d.tradeUrl);
+                            MessageActions.sendMessage(channelId, { content, tts: false, invalidEmojis: [], validNonShortcutEmojis: [] }, undefined, { nonce: String(Date.now()) });
                             return;
                         }
                     }
-                    return reply;
+                    // OFF (or no channel) → ephemeral "only you" embed with clean clickable links.
+                    return { embeds: [invEmbed(d.displayName, d.r, d.cur, d.steamId, d.tradeUrl)] };
                 } catch (e) { console.error("[VSI] /inventory", e); return { content: "Error pricing that inventory — try again in a moment." }; }
             },
         });
