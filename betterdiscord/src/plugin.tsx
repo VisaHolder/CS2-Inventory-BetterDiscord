@@ -1772,6 +1772,24 @@ function containerBlock(leaf: HTMLElement, boundary: HTMLElement): HTMLElement {
     return node;
 }
 
+// Different popout layouts drop the card into different containers: a padded section list (already
+// inset) vs. the full-bleed body (edge-to-edge). When the parent provides no side padding, add the
+// popout's real content inset so the card/buttons line up with the name/tags/bio instead of
+// stretching wider than everything else.
+function normalizeInset(wrap: HTMLElement, parent: HTMLElement, inner: HTMLElement) {
+    try {
+        if ((parseFloat(getComputedStyle(parent).paddingLeft) || 0) >= 8) return; // parent already insets its children
+        let inset = 12; // sane default popout content inset
+        const ref = inner.querySelector<HTMLElement>('[class*="nameTag"], [class*="userTag"], [class*="username"], [class*="tags_"], [class*="userInfo"], [class*="bio"]');
+        if (ref) {
+            const m = Math.round(ref.getBoundingClientRect().left - parent.getBoundingClientRect().left);
+            if (m > 2 && m < 60) inset = m;
+        }
+        wrap.style.paddingLeft = `${12 + inset}px`;
+        wrap.style.paddingRight = `${12 + inset}px`;
+    } catch { /* leave default padding */ }
+}
+
 function findInsertionPoint(inner: HTMLElement): { parent: HTMLElement; before: Node | null } | null {
     // Priority 1: sit right above "Game Collection" section (below View Full Bio, above the section list)
     const gc = findLeaf(inner, /^Game Collection$/i);
@@ -1829,6 +1847,7 @@ function tryInject(panel: HTMLElement) {
     if (!target) return;
     const btn = buildButton(shownId, isOwn, wantTradeRow, wantCard);
     target.parent.insertBefore(btn, target.before);
+    normalizeInset(btn, target.parent, inner);
 
     // For foreign users, resolve trade URL + Steam ID from two sources:
     // 1. Bio scrape (steamcommunity.com/tradeoffer/new/ URL in About Me)

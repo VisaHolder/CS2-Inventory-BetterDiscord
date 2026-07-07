@@ -1563,6 +1563,20 @@ function containerBlock(leaf, boundary) {
   }
   return node;
 }
+function normalizeInset(wrap, parent, inner) {
+  try {
+    if ((parseFloat(getComputedStyle(parent).paddingLeft) || 0) >= 8) return;
+    let inset = 12;
+    const ref = inner.querySelector('[class*="nameTag"], [class*="userTag"], [class*="username"], [class*="tags_"], [class*="userInfo"], [class*="bio"]');
+    if (ref) {
+      const m = Math.round(ref.getBoundingClientRect().left - parent.getBoundingClientRect().left);
+      if (m > 2 && m < 60) inset = m;
+    }
+    wrap.style.paddingLeft = `${12 + inset}px`;
+    wrap.style.paddingRight = `${12 + inset}px`;
+  } catch {
+  }
+}
 function findInsertionPoint(inner) {
   const gc = findLeaf(inner, /^Game Collection$/i);
   if (gc) {
@@ -1603,6 +1617,7 @@ function tryInject(panel) {
   if (!target) return;
   const btn = buildButton(shownId, isOwn, wantTradeRow, wantCard);
   target.parent.insertBefore(btn, target.before);
+  normalizeInset(btn, target.parent, inner);
   if (!isOwn) {
     const sync = resolveForeignSync(shownId);
     if (sync && (sync.tradeUrl || sync.steamId)) {
