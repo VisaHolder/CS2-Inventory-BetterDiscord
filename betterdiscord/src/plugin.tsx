@@ -737,6 +737,41 @@ async function pushItemsSnap(steamId: string, snap: ItemsSnapshot) {
     await DataStore.set(itemsKey(steamId), list.slice(0, 3));
 }
 
+// "What changed" between the two most recent full-item snapshots: items/quantities gained vs
+// dropped. Returns a compact one-liner ("gained ★ Karambit ×1 · dropped AWP · 2d ago") or null.
+function diffItemLists(cur: ItemsSnapshot, prev: ItemsSnapshot): { added: PricedItem[]; removed: PricedItem[] } {
+    const prevQty = new Map(prev.items.map(i => [i.name, i.qty]));
+    const curQty = new Map(cur.items.map(i => [i.name, i.qty]));
+    const added: PricedItem[] = [];
+    const removed: PricedItem[] = [];
+    for (const i of cur.items) {
+        const gained = i.qty - (prevQty.get(i.name) ?? 0);
+        if (gained > 0) added.push({ ...i, qty: gained });
+    }
+    for (const i of prev.items) {
+        const lost = i.qty - (curQty.get(i.name) ?? 0);
+        if (lost > 0) removed.push({ ...i, qty: lost });
+    }
+    return { added, removed };
+}
+
+async function buildDiffLine(steamId: string): Promise<string | null> {
+    const snaps = await getItemsSnaps(steamId);
+    if (snaps.length < 2) return null;
+    const [cur, prev] = snaps;
+    const { added, removed } = diffItemLists(cur, prev);
+    if (!added.length && !removed.length) return null;
+    const label = (arr: PricedItem[]) => {
+        const top = arr.slice().sort((a, b) => (b.price * b.qty) - (a.price * a.qty)).slice(0, 2)
+            .map(i => `${abbrevItem(i.name)}${i.qty > 1 ? ` ×${i.qty}` : ""}`);
+        return arr.length > 2 ? `${top.join(", ")} +${arr.length - 2} more` : top.join(", ");
+    };
+    const parts: string[] = [];
+    if (added.length) parts.push(`gained ${label(added)}`);
+    if (removed.length) parts.push(`dropped ${label(removed)}`);
+    return `${parts.join(" · ")} · ${humanAgo(cur.ts - prev.ts)}`;
+}
+
 // ─── Shared inventory-value cache (SteamID-keyed, USD-canonical) ────────────────
 // Read-through cache: once anyone prices a profile, everyone else loads it instantly,
 // and phase-accurate Doppler prices (from whoever holds a CSFloat key) propagate to
@@ -1185,6 +1220,12 @@ const BUTTON_CSS = `
 .vsi-inv-card:not(.loading) { cursor: pointer; }
 .vsi-inv-card:not(.loading):hover { border-color: rgba(255,255,255,.16); }
 
+/* "What changed since last time" line */
+.vsi-diff {
+    margin-top: 7px; padding-top: 7px; border-top: 1px solid rgba(255,255,255,.05);
+    font-size: 11px; line-height: 1.4; color: #949ba4;
+}
+
 /* ── Full breakdown modal ── */
 .vsi-modal-backdrop {
     position: fixed; inset: 0; z-index: 100000;
@@ -1476,6 +1517,9 @@ async function populateInventoryCard(card: HTMLElement, shownUserId: string, isO
         `).join("")}</div>`
         : "<div class=\"vsi-empty\">Top items will show after next /inventory run.</div>";
 
+    const changed = await buildDiffLine(steamId);
+    const diffHtml = changed ? `<div class="vsi-diff">${escapeHtml(changed)}</div>` : "";
+
     card.innerHTML = `
         <div class="vsi-card-header">
             <span>💼 CS2 Inventory</span>
@@ -1487,6 +1531,7 @@ async function populateInventoryCard(card: HTMLElement, shownUserId: string, isO
         </div>
         <div class="vsi-meta">${shortSource} · ${humanAgo(ageMs)}${itemCountBit}${staleTag}</div>
         ${topHtml}
+        ${diffHtml}
     `;
 }
 
@@ -1827,7 +1872,7 @@ function buildSettingsPanel(): any {
 // ─── /inventory slash command (BetterDiscord's BdApi.Commands) ──────────────────
 type PricedLike = { total: number; priced: number; marketableCount?: number; uniqueNames: number; topItems?: { name: string; price: number }[]; skippedNonMarketable?: number };
 
-function invMarkdown(displayName: string, r: PricedLike, cur: number, steamId?: string, tradeUrl?: string): string {
+function invMarkdown(displayName: string, r: PricedLike, cur: number, steamId?: string, tradeUrl?: string, changed?: string): string {
     const top = r.topItems ?? [];
     // Currency symbol pinned to the left edge, number right-padded so the decimal points
     // line up (padding the whole "C$40.59" instead made the C$ column ragged).
@@ -1844,13 +1889,14 @@ function invMarkdown(displayName: string, r: PricedLike, cur: number, steamId?: 
     ].filter(Boolean).join("\n-# ");
     return `## ${displayName} — ${fmt(r.total, cur)}\n`
         + `-# ${r.priced}/${r.marketableCount ?? r.priced} priced · ${r.uniqueNames} unique${untr}`
+        + (changed ? `\n-# ${changed}` : "")
         + (body ? `\n\`\`\`\n${body}\n\`\`\`` : "")
         + (links ? `\n-# ${links}` : "");
 }
 
 // Embed for the ephemeral ("only you") reply — embeds DO render masked links, so the
 // Steam / Trade links become clean clickable words instead of bare URLs.
-function invEmbed(displayName: string, r: PricedLike, cur: number, steamId?: string, tradeUrl?: string): any {
+function invEmbed(displayName: string, r: PricedLike, cur: number, steamId?: string, tradeUrl?: string, changed?: string): any {
     const sym = currencySymbol(cur);
     const top = r.topItems ?? [];
     const nums = top.map(i => i.price.toFixed(2));
@@ -1861,6 +1907,7 @@ function invEmbed(displayName: string, r: PricedLike, cur: number, steamId?: str
     if (steamId) linkParts.push(`[Steam Profile](https://steamcommunity.com/profiles/${steamId})`);
     if (tradeUrl) linkParts.push(`[Send Trade Offer](${tradeUrl})`);
     let description = `${r.priced}/${r.marketableCount ?? r.priced} priced · ${r.uniqueNames} unique${untr}`;
+    if (changed) description += `\n*${changed}*`;
     if (body) description += `\n\`\`\`\n${body}\n\`\`\``;
     if (linkParts.length) description += `\n${linkParts.join("  ·  ")}`;
     return { color: 0x5865F2, title: `${displayName} — ${fmt(r.total, cur)}`, description };
@@ -1868,12 +1915,14 @@ function invEmbed(displayName: string, r: PricedLike, cur: number, steamId?: str
 
 // Resolves + prices an inventory and returns the raw pieces, so execute can render it either
 // as a public markdown message or as an ephemeral embed (clickable links).
-type InvData = { error: string } | { displayName: string; r: PricedLike; cur: number; steamId: string; tradeUrl?: string };
+type InvData = { error: string } | { displayName: string; r: PricedLike; cur: number; steamId: string; tradeUrl?: string; changed?: string };
 
-function buildInventoryData(args: any[]): Promise<InvData> {
+async function buildInventoryData(args: any[]): Promise<InvData> {
     const userId = args.find((a: any) => a.name === "user")?.value as string | undefined;
     const steamRef = String(args.find((a: any) => a.name === "steam")?.value ?? "").trim();
-    return priceRef(userId, steamRef);
+    const d = await priceRef(userId, steamRef);
+    if ("error" in d) return d;
+    return { ...d, changed: (await buildDiffLine(d.steamId)) ?? undefined };
 }
 
 // Prices one side (a Discord user id OR a Steam ref string). Shared by /inventory and /compare.
@@ -1999,7 +2048,7 @@ function registerCommands(): void {
                 try {
                     const d = await buildInventoryData(cmdArgs ?? []);
                     if ("error" in d) return { content: d.error };
-                    return deliver(ctx, invMarkdown(d.displayName, d.r, d.cur, d.steamId, d.tradeUrl), invEmbed(d.displayName, d.r, d.cur, d.steamId, d.tradeUrl));
+                    return deliver(ctx, invMarkdown(d.displayName, d.r, d.cur, d.steamId, d.tradeUrl, d.changed), invEmbed(d.displayName, d.r, d.cur, d.steamId, d.tradeUrl, d.changed));
                 } catch (e) { console.error("[VSI] /inventory", e); return { content: "Error pricing that inventory — try again in a moment." }; }
             },
         });

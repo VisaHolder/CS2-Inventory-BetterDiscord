@@ -633,6 +633,36 @@ async function pushItemsSnap(steamId, snap) {
   }
   await DataStore.set(itemsKey(steamId), list.slice(0, 3));
 }
+function diffItemLists(cur, prev) {
+  const prevQty = new Map(prev.items.map((i) => [i.name, i.qty]));
+  const curQty = new Map(cur.items.map((i) => [i.name, i.qty]));
+  const added = [];
+  const removed = [];
+  for (const i of cur.items) {
+    const gained = i.qty - (prevQty.get(i.name) ?? 0);
+    if (gained > 0) added.push({ ...i, qty: gained });
+  }
+  for (const i of prev.items) {
+    const lost = i.qty - (curQty.get(i.name) ?? 0);
+    if (lost > 0) removed.push({ ...i, qty: lost });
+  }
+  return { added, removed };
+}
+async function buildDiffLine(steamId) {
+  const snaps = await getItemsSnaps(steamId);
+  if (snaps.length < 2) return null;
+  const [cur, prev] = snaps;
+  const { added, removed } = diffItemLists(cur, prev);
+  if (!added.length && !removed.length) return null;
+  const label = (arr) => {
+    const top = arr.slice().sort((a, b) => b.price * b.qty - a.price * a.qty).slice(0, 2).map((i) => `${abbrevItem(i.name)}${i.qty > 1 ? ` \xD7${i.qty}` : ""}`);
+    return arr.length > 2 ? `${top.join(", ")} +${arr.length - 2} more` : top.join(", ");
+  };
+  const parts = [];
+  if (added.length) parts.push(`gained ${label(added)}`);
+  if (removed.length) parts.push(`dropped ${label(removed)}`);
+  return `${parts.join(" \xB7 ")} \xB7 ${humanAgo(cur.ts - prev.ts)}`;
+}
 var CACHE_WORKER = "https://vsi-cache.reap-dev.workers.dev";
 var CACHE_FRESH_MS = 25 * 6e4;
 async function fxFor(cur) {
@@ -1051,6 +1081,12 @@ var BUTTON_CSS = `
 .vsi-inv-card:not(.loading) { cursor: pointer; }
 .vsi-inv-card:not(.loading):hover { border-color: rgba(255,255,255,.16); }
 
+/* "What changed since last time" line */
+.vsi-diff {
+    margin-top: 7px; padding-top: 7px; border-top: 1px solid rgba(255,255,255,.05);
+    font-size: 11px; line-height: 1.4; color: #949ba4;
+}
+
 /* \u2500\u2500 Full breakdown modal \u2500\u2500 */
 .vsi-modal-backdrop {
     position: fixed; inset: 0; z-index: 100000;
@@ -1307,6 +1343,8 @@ async function populateInventoryCard(card, shownUserId, isOwn) {
                 <span class="vsi-top-price">${fmt(i.price, cur)}</span>
             </div>
         `).join("")}</div>` : '<div class="vsi-empty">Top items will show after next /inventory run.</div>';
+  const changed = await buildDiffLine(steamId);
+  const diffHtml = changed ? `<div class="vsi-diff">${escapeHtml(changed)}</div>` : "";
   card.innerHTML = `
         <div class="vsi-card-header">
             <span>\u{1F4BC} CS2 Inventory</span>
@@ -1318,6 +1356,7 @@ async function populateInventoryCard(card, shownUserId, isOwn) {
         </div>
         <div class="vsi-meta">${shortSource} \xB7 ${humanAgo(ageMs)}${itemCountBit}${staleTag}</div>
         ${topHtml}
+        ${diffHtml}
     `;
 }
 function panelUserId(panel) {
@@ -1617,7 +1656,7 @@ function buildSettingsPanel() {
     }
   });
 }
-function invMarkdown(displayName, r, cur, steamId, tradeUrl) {
+function invMarkdown(displayName, r, cur, steamId, tradeUrl, changed) {
   const top = r.topItems ?? [];
   const sym = currencySymbol(cur);
   const nums = top.map((i) => i.price.toFixed(2));
@@ -1629,13 +1668,14 @@ function invMarkdown(displayName, r, cur, steamId, tradeUrl) {
     tradeUrl ? `Trade \xB7 <${tradeUrl}>` : ""
   ].filter(Boolean).join("\n-# ");
   return `## ${displayName} \u2014 ${fmt(r.total, cur)}
--# ${r.priced}/${r.marketableCount ?? r.priced} priced \xB7 ${r.uniqueNames} unique${untr}` + (body ? `
+-# ${r.priced}/${r.marketableCount ?? r.priced} priced \xB7 ${r.uniqueNames} unique${untr}` + (changed ? `
+-# ${changed}` : "") + (body ? `
 \`\`\`
 ${body}
 \`\`\`` : "") + (links ? `
 -# ${links}` : "");
 }
-function invEmbed(displayName, r, cur, steamId, tradeUrl) {
+function invEmbed(displayName, r, cur, steamId, tradeUrl, changed) {
   const sym = currencySymbol(cur);
   const top = r.topItems ?? [];
   const nums = top.map((i) => i.price.toFixed(2));
@@ -1646,6 +1686,8 @@ function invEmbed(displayName, r, cur, steamId, tradeUrl) {
   if (steamId) linkParts.push(`[Steam Profile](https://steamcommunity.com/profiles/${steamId})`);
   if (tradeUrl) linkParts.push(`[Send Trade Offer](${tradeUrl})`);
   let description = `${r.priced}/${r.marketableCount ?? r.priced} priced \xB7 ${r.uniqueNames} unique${untr}`;
+  if (changed) description += `
+*${changed}*`;
   if (body) description += `
 \`\`\`
 ${body}
@@ -1654,10 +1696,12 @@ ${body}
 ${linkParts.join("  \xB7  ")}`;
   return { color: 5793266, title: `${displayName} \u2014 ${fmt(r.total, cur)}`, description };
 }
-function buildInventoryData(args) {
+async function buildInventoryData(args) {
   const userId = args.find((a) => a.name === "user")?.value;
   const steamRef = String(args.find((a) => a.name === "steam")?.value ?? "").trim();
-  return priceRef(userId, steamRef);
+  const d = await priceRef(userId, steamRef);
+  if ("error" in d) return d;
+  return { ...d, changed: await buildDiffLine(d.steamId) ?? void 0 };
 }
 async function priceRef(userId, steamRef) {
   let steamId = null;
@@ -1775,7 +1819,7 @@ function registerCommands() {
         try {
           const d = await buildInventoryData(cmdArgs ?? []);
           if ("error" in d) return { content: d.error };
-          return deliver(ctx, invMarkdown(d.displayName, d.r, d.cur, d.steamId, d.tradeUrl), invEmbed(d.displayName, d.r, d.cur, d.steamId, d.tradeUrl));
+          return deliver(ctx, invMarkdown(d.displayName, d.r, d.cur, d.steamId, d.tradeUrl, d.changed), invEmbed(d.displayName, d.r, d.cur, d.steamId, d.tradeUrl, d.changed));
         } catch (e) {
           console.error("[VSI] /inventory", e);
           return { content: "Error pricing that inventory \u2014 try again in a moment." };
