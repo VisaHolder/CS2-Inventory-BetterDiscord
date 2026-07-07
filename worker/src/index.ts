@@ -30,7 +30,7 @@ const MAX_TRADE_URL_LEN = 200;
 
 const CORS: Record<string, string> = {
     "access-control-allow-origin": "*",
-    "access-control-allow-methods": "GET, POST, OPTIONS",
+    "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
     "access-control-allow-headers": "content-type",
 };
 
@@ -140,6 +140,20 @@ export default {
                 // so nobody can publish a trade URL for someone else's profile.
                 if (steamIdFromTradeUrl(tradeUrl) !== steamId) return json({ error: "partner mismatch" }, 403);
                 await env.INV.put(key, JSON.stringify({ trade_url: tradeUrl, ts: Date.now() }), { expirationTtl: TRADE_TTL_SECONDS });
+                return json({ ok: true });
+            }
+
+            if (req.method === "DELETE") {
+                // Un-share (owner flipped "Share Trade URL" off). Requires the exact stored URL —
+                // its token is the secret, so only the owner can remove their own entry.
+                const body: any = await req.json().catch(() => null);
+                const tradeUrl = typeof body?.trade_url === "string" ? body.trade_url.trim() : "";
+                if (!tradeUrl || steamIdFromTradeUrl(tradeUrl) !== steamId) return json({ error: "partner mismatch" }, 403);
+                const raw = await env.INV.get(key);
+                if (raw) {
+                    try { if ((JSON.parse(raw).trade_url as string) !== tradeUrl) return json({ error: "url mismatch" }, 403); } catch { /* corrupt → allow delete */ }
+                }
+                await env.INV.delete(key);
                 return json({ ok: true });
             }
 

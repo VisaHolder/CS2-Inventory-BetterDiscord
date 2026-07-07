@@ -128,6 +128,11 @@ const SETTINGS_SCHEMA: Record<string, any> = {
         default: "",
         placeholder: "https://steamcommunity.com/tradeoffer/new/?partner=...&token=...",
     },
+    shareTradeUrl: {
+        type: OptionType.BOOLEAN,
+        description: "Share your trade URL with other addon users, so they get a Trade button on your profile even without it in your Discord bio. Turn off to keep it private — it stays saved here, but it's pulled from the shared cache and no one else sees it.",
+        default: true,
+    },
     buttonTheme: {
         type: OptionType.SELECT,
         description: "Color scheme for the Trade and Steam buttons.",
@@ -765,8 +770,10 @@ async function cachePushTradeUrl(): Promise<void> {
     if (!tradeUrl) return;
     const steamId = steamIdFromTradeUrl(tradeUrl);
     if (!steamId) return;
+    // "Share Trade URL" off → don't publish, and pull any existing entry so others stop seeing it.
+    const method = settings.store.shareTradeUrl === false ? "DELETE" : "POST";
     try {
-        await fetchJson(`${CACHE_WORKER}/trade/${steamId}`, { method: "POST", body: { trade_url: tradeUrl } });
+        await fetchJson(`${CACHE_WORKER}/trade/${steamId}`, { method, body: { trade_url: tradeUrl } });
     } catch { /* best-effort */ }
 }
 
@@ -1586,7 +1593,7 @@ function buildSettingsPanel(): any {
             (settings.store as any)[id] = value;
             // Share your trade URL to the cache the moment you set it, so other addon users
             // see a Trade button on your profile right away.
-            if (id === "tradeUrl" || id === "useSharedCache") cachePushTradeUrl().catch(() => { /* best-effort */ });
+            if (id === "tradeUrl" || id === "useSharedCache" || id === "shareTradeUrl") cachePushTradeUrl().catch(() => { /* best-effort */ });
         },
     });
 }

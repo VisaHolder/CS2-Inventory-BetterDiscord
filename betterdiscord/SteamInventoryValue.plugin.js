@@ -123,6 +123,11 @@ var SETTINGS_SCHEMA = {
     default: "",
     placeholder: "https://steamcommunity.com/tradeoffer/new/?partner=...&token=..."
   },
+  shareTradeUrl: {
+    type: OptionType.BOOLEAN,
+    description: "Share your trade URL with other addon users, so they get a Trade button on your profile even without it in your Discord bio. Turn off to keep it private \u2014 it stays saved here, but it's pulled from the shared cache and no one else sees it.",
+    default: true
+  },
   buttonTheme: {
     type: OptionType.SELECT,
     description: "Color scheme for the Trade and Steam buttons.",
@@ -665,8 +670,9 @@ async function cachePushTradeUrl() {
   if (!tradeUrl) return;
   const steamId = steamIdFromTradeUrl(tradeUrl);
   if (!steamId) return;
+  const method = settings.store.shareTradeUrl === false ? "DELETE" : "POST";
   try {
-    await fetchJson(`${CACHE_WORKER}/trade/${steamId}`, { method: "POST", body: { trade_url: tradeUrl } });
+    await fetchJson(`${CACHE_WORKER}/trade/${steamId}`, { method, body: { trade_url: tradeUrl } });
   } catch {
   }
 }
@@ -1387,7 +1393,7 @@ function buildSettingsPanel() {
     settings: items,
     onChange: (_cat, id, value) => {
       settings.store[id] = value;
-      if (id === "tradeUrl" || id === "useSharedCache") cachePushTradeUrl().catch(() => {
+      if (id === "tradeUrl" || id === "useSharedCache" || id === "shareTradeUrl") cachePushTradeUrl().catch(() => {
       });
     }
   });
