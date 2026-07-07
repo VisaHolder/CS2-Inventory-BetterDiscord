@@ -217,18 +217,42 @@ const SETTINGS_SCHEMA: Record<string, any> = {
     // ── Profile card behavior ───────────────────────────────────────────────
     showPriceChange: {
         type: OptionType.BOOLEAN,
-        description: "Show a green/red delta chip when the total moved since your last /inventory run.",
+        description: "Show a green/red delta chip on the card (e.g. +C$0.88 · 24h) when the total moved.",
         default: true,
+    },
+    deltaMinAgeMinutes: {
+        type: OptionType.SELECT,
+        description: "Window for the gain/loss chip — the change since the most recent snapshot at least this old. (No background pricing, so it needs a snapshot from that far back.)",
+        options: [
+            { label: "1 hour", value: 60 },
+            { label: "6 hours", value: 360 },
+            { label: "24 hours", value: 1440, default: true },
+            { label: "7 days", value: 10080 },
+        ],
+    },
+    topItemsCount: {
+        type: OptionType.SELECT,
+        description: "How many top items the card lists.",
+        options: [
+            { label: "3", value: 3 },
+            { label: "5", value: 5, default: true },
+            { label: "10", value: 10 },
+        ],
+    },
+    compactCard: {
+        type: OptionType.BOOLEAN,
+        description: "Compact card — show just the total, delta and meta line; hide the top-items list (still one click away in the full breakdown).",
+        default: false,
+    },
+    autoRefreshStale: {
+        type: OptionType.BOOLEAN,
+        description: "When you open a profile whose price is stale, silently re-price it in the background and update the card in place — no STALE tag, no manual refresh.",
+        default: false,
     },
     showItemCount: {
         type: OptionType.BOOLEAN,
         description: 'Add "X items" to the card meta line.',
         default: false,
-    },
-    deltaMinAgeMinutes: {
-        type: OptionType.NUMBER,
-        description: 'Ignore snapshots newer than this when computing the delta. Prevents noisy "since 2m ago" deltas from back-to-back runs.',
-        default: 60,
     },
     snapshotStalenessHours: {
         type: OptionType.NUMBER,
@@ -674,7 +698,7 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
             perItem.push({ name: g.phase ? `${g.name} (${g.phase})` : g.name, price: p, qty: g.qty, icon: g.icon, stickerValue: sm?.value, stickerCount: sm?.count });
         }
         perItem.sort((a, b) => (b.price * b.qty) - (a.price * a.qty));
-        const topItems = perItem.slice(0, 5).map(i => ({ name: i.qty > 1 ? `${i.name} ×${i.qty}` : i.name, price: i.price * i.qty }));
+        const topItems = perItem.slice(0, 10).map(i => ({ name: i.qty > 1 ? `${i.name} ×${i.qty}` : i.name, price: i.price * i.qty }));
         return { total, priced, count: inv.assets.length, marketableCount, uniqueNames: uniqueNames.length, isPrivate: false, topItems, allItems: perItem, owned: Object.fromEntries(owned), stickerTotal, unpriced: unpriced.slice(0, 5), skippedNonMarketable };
     };
 
@@ -1397,6 +1421,7 @@ function buildButton(shownUserId: string, isOwn: boolean, wantTradeRow: boolean,
         const snapsSync = steamIdSync ? getSnapshotsSync(steamIdSync) : [];
         if (steamIdSync && snapsSync[0]) {
             renderPricedCard(card, snapsSync[0], snapsSync.slice(1), buildDiffLineSync(steamIdSync));
+            maybeAutoRefresh(card, snapsSync[0], shownUserId, isOwn);
         } else {
             card.classList.add("loading");
             card.innerHTML = `
@@ -1553,6 +1578,16 @@ async function populateInventoryCard(card: HTMLElement, shownUserId: string, isO
 
     const history = snaps[0] === latest ? snaps.slice(1) : snaps;
     renderPricedCard(card, latest, history, await buildDiffLine(steamId));
+    maybeAutoRefresh(card, latest, shownUserId, isOwn);
+}
+
+// If auto-refresh is on and this snapshot is stale, silently re-price in the background and let
+// the refresh update the card in place. No loop: a successful re-price stamps a fresh ts.
+function maybeAutoRefresh(card: HTMLElement, latest: Snapshot, shownUserId: string, isOwn: boolean) {
+    if (!settings.store.autoRefreshStale || card.classList.contains("loading")) return;
+    const staleH = settings.store.snapshotStalenessHours || 6; // still auto-refresh even if the STALE display is off
+    if (Date.now() - latest.ts <= staleH * 3_600_000) return;
+    refreshCard(card, shownUserId, isOwn).catch(() => { /* */ });
 }
 
 // Pure, synchronous card render from a resolved snapshot (+ older history for the delta chip,
@@ -1561,7 +1596,9 @@ function renderPricedCard(card: HTMLElement, latest: Snapshot, history: Snapshot
     const cur = latest.currency || 1;
     const ageMs = Date.now() - latest.ts;
     const staleH = settings.store.snapshotStalenessHours || 0;
-    const isStale = staleH > 0 && ageMs > staleH * 3_600_000;
+    // When auto-refresh is on, a stale card gets re-priced in the background, so don't bother
+    // flagging it STALE — it'd just flash and vanish.
+    const isStale = staleH > 0 && ageMs > staleH * 3_600_000 && !settings.store.autoRefreshStale;
     card.classList.remove("loading");
     card.classList.toggle("stale", isStale);
 
@@ -1590,15 +1627,17 @@ function renderPricedCard(card: HTMLElement, latest: Snapshot, history: Snapshot
 
     const staleTag = isStale ? "<span class=\"vsi-stale-tag\">STALE</span>" : "";
 
-    const topItems = latest.topItems ?? [];
-    const topHtml = topItems.length
-        ? `<div class="vsi-top-list">${topItems.map(i => `
-            <div class="vsi-top-row">
-                <span class="vsi-top-name">${escapeHtml(abbrevItem(i.name))}</span>
-                <span class="vsi-top-price">${fmt(i.price, cur)}</span>
-            </div>
-        `).join("")}</div>`
-        : "<div class=\"vsi-empty\">Top items will show after next /inventory run.</div>";
+    const topItems = (latest.topItems ?? []).slice(0, settings.store.topItemsCount || 5);
+    const topHtml = settings.store.compactCard
+        ? ""
+        : topItems.length
+            ? `<div class="vsi-top-list">${topItems.map(i => `
+                <div class="vsi-top-row">
+                    <span class="vsi-top-name">${escapeHtml(abbrevItem(i.name))}</span>
+                    <span class="vsi-top-price">${fmt(i.price, cur)}</span>
+                </div>
+            `).join("")}</div>`
+            : "<div class=\"vsi-empty\">Top items will show after next /inventory run.</div>";
 
     const diffHtml = changed ? `<div class="vsi-diff">${escapeHtml(changed)}</div>` : "";
 
