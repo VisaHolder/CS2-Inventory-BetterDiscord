@@ -1567,7 +1567,7 @@ function invMarkdown(displayName: string, r: PricedLike, cur: number): string {
     const untr = (r.skippedNonMarketable ?? 0) > 0 ? ` · ${r.skippedNonMarketable} untradeable` : "";
     // Clean receipt: name + total on one header line, small subtext, then a single
     // monospace block with right-aligned prices (no scattered code-span boxes).
-    return `## 💼 ${displayName} — ${fmt(r.total, cur)}\n`
+    return `## ${displayName} — ${fmt(r.total, cur)}\n`
         + `-# ${r.priced}/${r.marketableCount ?? r.priced} priced · ${r.uniqueNames} unique${untr}`
         + (rows ? `\n\`\`\`\n${rows}\n\`\`\`` : "");
 }

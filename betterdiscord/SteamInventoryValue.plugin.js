@@ -1374,7 +1374,7 @@ function invMarkdown(displayName, r, cur) {
   const w = top.reduce((a, i) => Math.max(a, fmt(i.price, cur).length), 0);
   const rows = top.map((i) => `${fmt(i.price, cur).padStart(w)}  ${abbrevItem(i.name)}`).join("\n");
   const untr = (r.skippedNonMarketable ?? 0) > 0 ? ` \xB7 ${r.skippedNonMarketable} untradeable` : "";
-  return `## \u{1F4BC} ${displayName} \u2014 ${fmt(r.total, cur)}
+  return `## ${displayName} \u2014 ${fmt(r.total, cur)}
 -# ${r.priced}/${r.marketableCount ?? r.priced} priced \xB7 ${r.uniqueNames} unique${untr}` + (rows ? `
 \`\`\`
 ${rows}
