@@ -12,8 +12,8 @@ Real Doppler phase pricing · live prices in your currency · Trade Offer & Stea
 
 |  Full (with top items)  |  Compact  |
 |:---:|:---:|
-| <img src="docs/card.png" width="230" alt="Full card" /> | <img src="docs/card-compact.png" width="230" alt="Compact card" /> |
-| <img src="docs/card-big.png" width="230" alt="Larger inventory, full" /> | <img src="docs/card-big-compact.png" width="230" alt="Larger inventory, compact" /> |
+| <img src="docs/shot-full.png" width="230" alt="Full card" /> | <img src="docs/shot-compact.png" width="230" alt="Compact card" /> |
+| <img src="docs/shot-full-2.png" width="230" alt="Larger inventory, full" /> | <img src="docs/shot-compact-2.png" width="230" alt="Larger inventory, compact" /> |
 
 <sub>The card on a profile, shown full and compact. The sparkline is green when the value's up, red when it's down.</sub>
 
