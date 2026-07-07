@@ -1560,16 +1560,24 @@ function buildSettingsPanel(): any {
 // ─── /inventory slash command (BetterDiscord's BdApi.Commands) ──────────────────
 type PricedLike = { total: number; priced: number; marketableCount?: number; uniqueNames: number; topItems?: { name: string; price: number }[]; skippedNonMarketable?: number };
 
-function invMarkdown(displayName: string, r: PricedLike, cur: number): string {
+function invMarkdown(displayName: string, r: PricedLike, cur: number, steamId?: string, tradeUrl?: string): string {
     const top = r.topItems ?? [];
-    const w = top.reduce((a, i) => Math.max(a, fmt(i.price, cur).length), 0);
-    const rows = top.map(i => `${fmt(i.price, cur).padStart(w)}  ${abbrevItem(i.name)}`).join("\n");
+    // Bare numbers (currency lives in the header total), right-aligned so the decimal
+    // points line up. A per-row "C$" made the left edge ragged — this is the fix.
+    const nums = top.map(i => i.price.toFixed(2));
+    const w = nums.reduce((a, s) => Math.max(a, s.length), 0);
+    const body = top.map((i, k) => `${nums[k].padStart(w)}  ${abbrevItem(i.name)}`).join("\n");
     const untr = (r.skippedNonMarketable ?? 0) > 0 ? ` · ${r.skippedNonMarketable} untradeable` : "";
-    // Clean receipt: name + total on one header line, small subtext, then a single
-    // monospace block with right-aligned prices (no scattered code-span boxes).
+    // Discord doesn't render masked links in normal user messages, so links are bare
+    // URLs wrapped in <> (clickable, no big embed card). Shown as a small footer line.
+    const links = [
+        steamId ? `<https://steamcommunity.com/profiles/${steamId}>` : "",
+        tradeUrl ? `<${tradeUrl}>` : "",
+    ].filter(Boolean).join("  ·  ");
     return `## ${displayName} — ${fmt(r.total, cur)}\n`
         + `-# ${r.priced}/${r.marketableCount ?? r.priced} priced · ${r.uniqueNames} unique${untr}`
-        + (rows ? `\n\`\`\`\n${rows}\n\`\`\`` : "");
+        + (body ? `\n\`\`\`\n${body}\n\`\`\`` : "")
+        + (links ? `\n-# ${links}` : "");
 }
 
 // BetterDiscord sends whatever execute returns, so we build the reply and return { content }.
@@ -1595,7 +1603,7 @@ async function buildInventoryReply(args: any[]): Promise<{ content: string }> {
     const cur = settings.store.marketCurrency || 1;
     // Cache-first for speed; else price via CSFloat (the slow live fallback is skipped in commands).
     const cached = await cacheGetInventory(steamId, cur);
-    if (cached) return { content: invMarkdown(displayName, cached, cur) };
+    if (cached) return { content: invMarkdown(displayName, cached, cur, steamId) };
 
     const validSources = new Set(["csfloat", "skinport", "live_steam"]);
     const stored = settings.store.priceSource as string;
@@ -1603,7 +1611,7 @@ async function buildInventoryReply(args: any[]): Promise<{ content: string }> {
     const inv = await loadInventory(steamId, { source, useLiveFallback: false });
     if (inv.isPrivate) return { content: `**${displayName}**'s Steam inventory is private.` };
     cachePushInventory(steamId, { total: inv.total, priced: inv.priced, itemCount: inv.count, marketableCount: inv.marketableCount, uniqueNames: inv.uniqueNames, ts: Date.now(), source, currency: cur, topItems: inv.topItems });
-    return { content: invMarkdown(displayName, inv, cur) };
+    return { content: invMarkdown(displayName, inv, cur, steamId) };
 }
 
 function registerCommands(): void {

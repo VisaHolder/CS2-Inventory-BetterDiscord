@@ -1369,16 +1369,22 @@ function buildSettingsPanel() {
     }
   });
 }
-function invMarkdown(displayName, r, cur) {
+function invMarkdown(displayName, r, cur, steamId, tradeUrl) {
   const top = r.topItems ?? [];
-  const w = top.reduce((a, i) => Math.max(a, fmt(i.price, cur).length), 0);
-  const rows = top.map((i) => `${fmt(i.price, cur).padStart(w)}  ${abbrevItem(i.name)}`).join("\n");
+  const nums = top.map((i) => i.price.toFixed(2));
+  const w = nums.reduce((a, s) => Math.max(a, s.length), 0);
+  const body = top.map((i, k) => `${nums[k].padStart(w)}  ${abbrevItem(i.name)}`).join("\n");
   const untr = (r.skippedNonMarketable ?? 0) > 0 ? ` \xB7 ${r.skippedNonMarketable} untradeable` : "";
+  const links = [
+    steamId ? `<https://steamcommunity.com/profiles/${steamId}>` : "",
+    tradeUrl ? `<${tradeUrl}>` : ""
+  ].filter(Boolean).join("  \xB7  ");
   return `## ${displayName} \u2014 ${fmt(r.total, cur)}
--# ${r.priced}/${r.marketableCount ?? r.priced} priced \xB7 ${r.uniqueNames} unique${untr}` + (rows ? `
+-# ${r.priced}/${r.marketableCount ?? r.priced} priced \xB7 ${r.uniqueNames} unique${untr}` + (body ? `
 \`\`\`
-${rows}
-\`\`\`` : "");
+${body}
+\`\`\`` : "") + (links ? `
+-# ${links}` : "");
 }
 async function buildInventoryReply(args) {
   const userId = args.find((a) => a.name === "user")?.value;
@@ -1399,14 +1405,14 @@ async function buildInventoryReply(args) {
   }
   const cur = settings.store.marketCurrency || 1;
   const cached = await cacheGetInventory(steamId, cur);
-  if (cached) return { content: invMarkdown(displayName, cached, cur) };
+  if (cached) return { content: invMarkdown(displayName, cached, cur, steamId) };
   const validSources = /* @__PURE__ */ new Set(["csfloat", "skinport", "live_steam"]);
   const stored = settings.store.priceSource;
   const source = validSources.has(stored) ? stored : "csfloat";
   const inv = await loadInventory(steamId, { source, useLiveFallback: false });
   if (inv.isPrivate) return { content: `**${displayName}**'s Steam inventory is private.` };
   cachePushInventory(steamId, { total: inv.total, priced: inv.priced, itemCount: inv.count, marketableCount: inv.marketableCount, uniqueNames: inv.uniqueNames, ts: Date.now(), source, currency: cur, topItems: inv.topItems });
-  return { content: invMarkdown(displayName, inv, cur) };
+  return { content: invMarkdown(displayName, inv, cur, steamId) };
 }
 function registerCommands() {
   try {
