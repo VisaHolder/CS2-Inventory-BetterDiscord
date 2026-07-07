@@ -293,6 +293,13 @@ async function getSteamId(userId: string): Promise<string | null> {
     return steam?.id ?? null;
 }
 
+// Synchronous SteamID from the already-loaded profile store (no fetch) — powers the instant,
+// skeleton-free card render when the profile is already in memory.
+function getSteamIdSync(userId: string): string | null {
+    const accounts = getAccounts(UserProfileStore.getUserProfile(userId));
+    return accounts.find((c: any) => c.type === "steam" || c.type === "STEAM")?.id ?? null;
+}
+
 // Session-scoped price memo for live Steam per-item lookups: keyed by "name|currency"
 const priceMemo = new Map<string, { price: number; ts: number }>();
 
@@ -747,6 +754,10 @@ const snapKey = (steamId: string) => `vsi.snap.${steamId}`;
 async function getSnapshots(steamId: string): Promise<Snapshot[]> {
     return (await DataStore.get(snapKey(steamId))) ?? [];
 }
+// BdApi.Data.load is synchronous under the hood — these read the same data with no await,
+// so a card whose snapshot is already stored can render immediately (no loading skeleton).
+const getSnapshotsSync = (steamId: string): Snapshot[] => BD.Data.load(PLUGIN_NAME, snapKey(steamId)) ?? [];
+const getItemsSnapsSync = (steamId: string): ItemsSnapshot[] => BD.Data.load(PLUGIN_NAME, itemsKey(steamId)) ?? [];
 
 async function pushSnapshot(steamId: string, snap: Snapshot) {
     const list = await getSnapshots(steamId);
@@ -791,8 +802,10 @@ async function pushItemsSnap(steamId: string, snap: ItemsSnapshot) {
 // phantom gains/losses. Only real inventory changes count. Returns null when nothing changed
 // or when a snapshot predates owned-tracking.
 type DiffEntry = { name: string; qty: number; price: number };
-async function buildDiffLine(steamId: string): Promise<string | null> {
-    const snaps = await getItemsSnaps(steamId);
+const buildDiffLine = async (steamId: string): Promise<string | null> => diffLineFromSnaps(await getItemsSnaps(steamId));
+const buildDiffLineSync = (steamId: string): string | null => diffLineFromSnaps(getItemsSnapsSync(steamId));
+
+function diffLineFromSnaps(snaps: ItemsSnapshot[]): string | null {
     if (snaps.length < 2) return null;
     const [cur, prev] = snaps;
     if (!cur.owned || !prev.owned) return null; // pre-owned snapshot → can't diff reliably
@@ -1002,15 +1015,7 @@ const BUTTON_CSS = `
     width: 100%;
     box-sizing: border-box;
 }
-/* Only rows added from an async network fetch get the slide-in; sync (cache-hit) rows
-   are rendered as .vsi-trade-row.instant and skip the animation entirely. */
-.vsi-trade-row:not(.instant) {
-    animation: vsi-row-in 0.32s cubic-bezier(.16,.84,.44,1) both;
-}
-@keyframes vsi-row-in {
-    from { opacity: 0; transform: translateY(-6px); }
-    to   { opacity: 1; transform: translateY(0); }
-}
+/* No entrance animation — the row appears in place, never slides/fades in. */
 .vsi-trade-row > .vsi-trade-btn { min-width: 0; flex: 1 1 0; }
 .vsi-trade-row > .vsi-trade-main { flex: 5 1 0; }
 .vsi-trade-row > .vsi-trade-profile { flex: 3 1 0; }
@@ -1377,21 +1382,34 @@ function buildButton(shownUserId: string, isOwn: boolean, wantTradeRow: boolean,
 
     if (wantCard) {
         const card = document.createElement("div");
-        card.className = "vsi-inv-card loading";
+        card.className = "vsi-inv-card";
         card.dataset.vsiBadge = "1";
-        card.innerHTML = `
-            <div class="vsi-card-header">
-                <span>💼 CS2 Inventory</span>
-                <span class="vsi-refresh" title="Loading…">↻</span>
-            </div>
-            <div class="vsi-value-row"><span class="vsi-skel vsi-skel-value"></span></div>
-            <div class="vsi-skel vsi-skel-meta"></div>
-            <div class="vsi-top-list">
-                <span class="vsi-skel vsi-skel-row"></span>
-                <span class="vsi-skel vsi-skel-row"></span>
-                <span class="vsi-skel vsi-skel-row"></span>
-            </div>
-        `;
+
+        // Instant path: if the profile + a local snapshot are already in memory, render the final
+        // card synchronously — no loading skeleton, no flash. Otherwise show the skeleton and
+        // resolve asynchronously.
+        const steamIdSync = getSteamIdSync(shownUserId);
+        const snapsSync = steamIdSync ? getSnapshotsSync(steamIdSync) : [];
+        if (steamIdSync && snapsSync[0]) {
+            renderPricedCard(card, snapsSync[0], snapsSync.slice(1), buildDiffLineSync(steamIdSync));
+        } else {
+            card.classList.add("loading");
+            card.innerHTML = `
+                <div class="vsi-card-header">
+                    <span>💼 CS2 Inventory</span>
+                    <span class="vsi-refresh" title="Loading…">↻</span>
+                </div>
+                <div class="vsi-value-row"><span class="vsi-skel vsi-skel-value"></span></div>
+                <div class="vsi-skel vsi-skel-meta"></div>
+                <div class="vsi-top-list">
+                    <span class="vsi-skel vsi-skel-row"></span>
+                    <span class="vsi-skel vsi-skel-row"></span>
+                    <span class="vsi-skel vsi-skel-row"></span>
+                </div>
+            `;
+            populateInventoryCard(card, shownUserId, isOwn).catch(e => console.error("[VSI] populateInventoryCard", e));
+        }
+
         // Delegate refresh / load clicks at the card level so innerHTML rewrites don't kill the handler.
         card.addEventListener("click", e => {
             const t = e.target as HTMLElement | null;
@@ -1407,7 +1425,6 @@ function buildButton(shownUserId: string, isOwn: boolean, wantTradeRow: boolean,
             openInventoryModalForUser(shownUserId).catch(err => console.error("[VSI] open modal", err));
         });
         wrap.appendChild(card);
-        populateInventoryCard(card, shownUserId, isOwn).catch(e => console.error("[VSI] populateInventoryCard", e));
     }
 
     return wrap;
@@ -1529,16 +1546,24 @@ async function populateInventoryCard(card: HTMLElement, shownUserId: string, isO
         return;
     }
 
+    const history = snaps[0] === latest ? snaps.slice(1) : snaps;
+    renderPricedCard(card, latest, history, await buildDiffLine(steamId));
+}
+
+// Pure, synchronous card render from a resolved snapshot (+ older history for the delta chip,
+// + the already-computed diff line). Shared by the async populate and the instant sync path.
+function renderPricedCard(card: HTMLElement, latest: Snapshot, history: Snapshot[], changed: string | null) {
     const cur = latest.currency || 1;
     const ageMs = Date.now() - latest.ts;
     const staleH = settings.store.snapshotStalenessHours || 0;
     const isStale = staleH > 0 && ageMs > staleH * 3_600_000;
-    if (isStale) card.classList.add("stale");
+    card.classList.remove("loading");
+    card.classList.toggle("stale", isStale);
 
     let deltaHtml = "";
     if (settings.store.showPriceChange) {
         const minAge = (settings.store.deltaMinAgeMinutes || 60) * 60_000;
-        const d = computeDelta(latest.total, snaps.slice(1), minAge);
+        const d = computeDelta(latest.total, history, minAge);
         if (d) {
             const cls = d.delta > 0 ? "up" : d.delta < 0 ? "down" : "";
             const sign = d.delta >= 0 ? "+" : "";
@@ -1567,7 +1592,6 @@ async function populateInventoryCard(card: HTMLElement, shownUserId: string, isO
         `).join("")}</div>`
         : "<div class=\"vsi-empty\">Top items will show after next /inventory run.</div>";
 
-    const changed = await buildDiffLine(steamId);
     const diffHtml = changed ? `<div class="vsi-diff">${escapeHtml(changed)}</div>` : "";
 
     card.innerHTML = `
@@ -1676,28 +1700,33 @@ function tryInject(panel: HTMLElement) {
     // fall back to an async fetch (with fade-in) only when the profile isn't loaded yet.
     if (!isOwn) {
         const sync = resolveForeignSync(shownId);
-        if (sync?.tradeUrl) {
-            // Fast path: profile in memory AND a trade URL in the bio → render instantly, no flash.
+        if (sync && (sync.tradeUrl || sync.steamId)) {
+            // Everything needed is already in memory → render the row NOW, no fetch, no animation.
             const row = buildForeignRow(sync.tradeUrl, sync.steamId);
-            if (row) {
-                row.classList.add("instant");
-                btn.insertBefore(row, btn.firstChild);
+            if (row) btn.insertBefore(row, btn.firstChild);
+            // SteamID but no bio trade URL → check the shared cache in the background and quietly
+            // swap in a Trade button if one is published (the Steam button never moves/re-pops).
+            if (!sync.tradeUrl && sync.steamId) {
+                const sid = sync.steamId;
+                cacheGetTradeUrl(sid).then(tradeUrl => {
+                    if (!tradeUrl || !btn.isConnected) return;
+                    const existing = btn.querySelector<HTMLElement>(".vsi-trade-row");
+                    const upgraded = buildForeignRow(tradeUrl, sid);
+                    if (existing && upgraded) existing.replaceWith(upgraded);
+                }).catch(() => { /* */ });
             }
         } else {
-            // Resolve the trade URL from bio, else the shared cache (owner-published), and the
-            // SteamID from their connection — so the Trade button shows even without it in the bio.
+            // Profile not in memory yet → we must fetch. Render once when it lands (no animation).
             (async () => {
-                const bioTradeUrl = sync ? sync.tradeUrl
-                    : await getTradeUrlForUser(shownId).catch(e => { console.warn("[VSI] getTradeUrlForUser threw", e); return null as string | null; });
-                const steamId = sync?.steamId ?? await getSteamId(shownId).catch(e => { console.warn("[VSI] getSteamId threw", e); return null as string | null; });
+                const [bioTradeUrl, steamId] = await Promise.all([
+                    getTradeUrlForUser(shownId).catch(() => null as string | null),
+                    getSteamId(shownId).catch(() => null as string | null),
+                ]);
                 const tradeUrl = bioTradeUrl ?? (steamId ? await cacheGetTradeUrl(steamId).catch(() => null) : null);
-                if (!tradeUrl && !steamId) return;
-                if (!btn.isConnected) return;
-                if (btn.querySelector(".vsi-trade-row")) return;
+                if ((!tradeUrl && !steamId) || !btn.isConnected || btn.querySelector(".vsi-trade-row")) return;
                 const row = buildForeignRow(tradeUrl, steamId);
-                if (!row) return;
-                btn.insertBefore(row, btn.firstChild); // no .instant class → animation runs
-            })().catch(e => console.error("[VSI] foreign row outer", e));
+                if (row) btn.insertBefore(row, btn.firstChild);
+            })().catch(e => console.error("[VSI] foreign row", e));
         }
     }
 }

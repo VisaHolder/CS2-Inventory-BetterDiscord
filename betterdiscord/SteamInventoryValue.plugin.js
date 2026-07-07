@@ -276,6 +276,10 @@ async function getSteamId(userId) {
   const steam = accounts.find((c) => c.type === "steam" || c.type === "STEAM");
   return steam?.id ?? null;
 }
+function getSteamIdSync(userId) {
+  const accounts = getAccounts(UserProfileStore.getUserProfile(userId));
+  return accounts.find((c) => c.type === "steam" || c.type === "STEAM")?.id ?? null;
+}
 var priceMemo = /* @__PURE__ */ new Map();
 var bulkCache = null;
 function currencyCode(cur) {
@@ -647,6 +651,8 @@ var snapKey = (steamId) => `vsi.snap.${steamId}`;
 async function getSnapshots(steamId) {
   return await DataStore.get(snapKey(steamId)) ?? [];
 }
+var getSnapshotsSync = (steamId) => BD.Data.load(PLUGIN_NAME, snapKey(steamId)) ?? [];
+var getItemsSnapsSync = (steamId) => BD.Data.load(PLUGIN_NAME, itemsKey(steamId)) ?? [];
 async function pushSnapshot(steamId, snap) {
   const list = await getSnapshots(steamId);
   list.unshift(snap);
@@ -673,8 +679,9 @@ async function pushItemsSnap(steamId, snap) {
   }
   await DataStore.set(itemsKey(steamId), list.slice(0, 3));
 }
-async function buildDiffLine(steamId) {
-  const snaps = await getItemsSnaps(steamId);
+var buildDiffLine = async (steamId) => diffLineFromSnaps(await getItemsSnaps(steamId));
+var buildDiffLineSync = (steamId) => diffLineFromSnaps(getItemsSnapsSync(steamId));
+function diffLineFromSnaps(snaps) {
   if (snaps.length < 2) return null;
   const [cur, prev] = snaps;
   if (!cur.owned || !prev.owned) return null;
@@ -857,15 +864,7 @@ var BUTTON_CSS = `
     width: 100%;
     box-sizing: border-box;
 }
-/* Only rows added from an async network fetch get the slide-in; sync (cache-hit) rows
-   are rendered as .vsi-trade-row.instant and skip the animation entirely. */
-.vsi-trade-row:not(.instant) {
-    animation: vsi-row-in 0.32s cubic-bezier(.16,.84,.44,1) both;
-}
-@keyframes vsi-row-in {
-    from { opacity: 0; transform: translateY(-6px); }
-    to   { opacity: 1; transform: translateY(0); }
-}
+/* No entrance animation \u2014 the row appears in place, never slides/fades in. */
 .vsi-trade-row > .vsi-trade-btn { min-width: 0; flex: 1 1 0; }
 .vsi-trade-row > .vsi-trade-main { flex: 5 1 0; }
 .vsi-trade-row > .vsi-trade-profile { flex: 3 1 0; }
@@ -1225,21 +1224,29 @@ function buildButton(shownUserId, isOwn, wantTradeRow, wantCard) {
   }
   if (wantCard) {
     const card = document.createElement("div");
-    card.className = "vsi-inv-card loading";
+    card.className = "vsi-inv-card";
     card.dataset.vsiBadge = "1";
-    card.innerHTML = `
-            <div class="vsi-card-header">
-                <span>\u{1F4BC} CS2 Inventory</span>
-                <span class="vsi-refresh" title="Loading\u2026">\u21BB</span>
-            </div>
-            <div class="vsi-value-row"><span class="vsi-skel vsi-skel-value"></span></div>
-            <div class="vsi-skel vsi-skel-meta"></div>
-            <div class="vsi-top-list">
-                <span class="vsi-skel vsi-skel-row"></span>
-                <span class="vsi-skel vsi-skel-row"></span>
-                <span class="vsi-skel vsi-skel-row"></span>
-            </div>
-        `;
+    const steamIdSync = getSteamIdSync(shownUserId);
+    const snapsSync = steamIdSync ? getSnapshotsSync(steamIdSync) : [];
+    if (steamIdSync && snapsSync[0]) {
+      renderPricedCard(card, snapsSync[0], snapsSync.slice(1), buildDiffLineSync(steamIdSync));
+    } else {
+      card.classList.add("loading");
+      card.innerHTML = `
+                <div class="vsi-card-header">
+                    <span>\u{1F4BC} CS2 Inventory</span>
+                    <span class="vsi-refresh" title="Loading\u2026">\u21BB</span>
+                </div>
+                <div class="vsi-value-row"><span class="vsi-skel vsi-skel-value"></span></div>
+                <div class="vsi-skel vsi-skel-meta"></div>
+                <div class="vsi-top-list">
+                    <span class="vsi-skel vsi-skel-row"></span>
+                    <span class="vsi-skel vsi-skel-row"></span>
+                    <span class="vsi-skel vsi-skel-row"></span>
+                </div>
+            `;
+      populateInventoryCard(card, shownUserId, isOwn).catch((e) => console.error("[VSI] populateInventoryCard", e));
+    }
     card.addEventListener("click", (e) => {
       const t = e.target;
       if (t?.closest?.(".vsi-refresh, .vsi-load-btn")) {
@@ -1253,7 +1260,6 @@ function buildButton(shownUserId, isOwn, wantTradeRow, wantCard) {
       openInventoryModalForUser(shownUserId).catch((err) => console.error("[VSI] open modal", err));
     });
     wrap.appendChild(card);
-    populateInventoryCard(card, shownUserId, isOwn).catch((e) => console.error("[VSI] populateInventoryCard", e));
   }
   return wrap;
 }
@@ -1368,15 +1374,20 @@ async function populateInventoryCard(card, shownUserId, isOwn) {
         `;
     return;
   }
+  const history = snaps[0] === latest ? snaps.slice(1) : snaps;
+  renderPricedCard(card, latest, history, await buildDiffLine(steamId));
+}
+function renderPricedCard(card, latest, history, changed) {
   const cur = latest.currency || 1;
   const ageMs = Date.now() - latest.ts;
   const staleH = settings.store.snapshotStalenessHours || 0;
   const isStale = staleH > 0 && ageMs > staleH * 36e5;
-  if (isStale) card.classList.add("stale");
+  card.classList.remove("loading");
+  card.classList.toggle("stale", isStale);
   let deltaHtml = "";
   if (settings.store.showPriceChange) {
     const minAge = (settings.store.deltaMinAgeMinutes || 60) * 6e4;
-    const d = computeDelta(latest.total, snaps.slice(1), minAge);
+    const d = computeDelta(latest.total, history, minAge);
     if (d) {
       const cls = d.delta > 0 ? "up" : d.delta < 0 ? "down" : "";
       const sign = d.delta >= 0 ? "+" : "";
@@ -1393,7 +1404,6 @@ async function populateInventoryCard(card, shownUserId, isOwn) {
                 <span class="vsi-top-price">${fmt(i.price, cur)}</span>
             </div>
         `).join("")}</div>` : '<div class="vsi-empty">Top items will show after next /inventory run.</div>';
-  const changed = await buildDiffLine(steamId);
   const diffHtml = changed ? `<div class="vsi-diff">${escapeHtml(changed)}</div>` : "";
   card.innerHTML = `
         <div class="vsi-card-header">
@@ -1478,30 +1488,30 @@ function tryInject(panel) {
   target.parent.insertBefore(btn, target.before);
   if (!isOwn) {
     const sync = resolveForeignSync(shownId);
-    if (sync?.tradeUrl) {
+    if (sync && (sync.tradeUrl || sync.steamId)) {
       const row = buildForeignRow(sync.tradeUrl, sync.steamId);
-      if (row) {
-        row.classList.add("instant");
-        btn.insertBefore(row, btn.firstChild);
+      if (row) btn.insertBefore(row, btn.firstChild);
+      if (!sync.tradeUrl && sync.steamId) {
+        const sid = sync.steamId;
+        cacheGetTradeUrl(sid).then((tradeUrl) => {
+          if (!tradeUrl || !btn.isConnected) return;
+          const existing = btn.querySelector(".vsi-trade-row");
+          const upgraded = buildForeignRow(tradeUrl, sid);
+          if (existing && upgraded) existing.replaceWith(upgraded);
+        }).catch(() => {
+        });
       }
     } else {
       (async () => {
-        const bioTradeUrl = sync ? sync.tradeUrl : await getTradeUrlForUser(shownId).catch((e) => {
-          console.warn("[VSI] getTradeUrlForUser threw", e);
-          return null;
-        });
-        const steamId = sync?.steamId ?? await getSteamId(shownId).catch((e) => {
-          console.warn("[VSI] getSteamId threw", e);
-          return null;
-        });
+        const [bioTradeUrl, steamId] = await Promise.all([
+          getTradeUrlForUser(shownId).catch(() => null),
+          getSteamId(shownId).catch(() => null)
+        ]);
         const tradeUrl = bioTradeUrl ?? (steamId ? await cacheGetTradeUrl(steamId).catch(() => null) : null);
-        if (!tradeUrl && !steamId) return;
-        if (!btn.isConnected) return;
-        if (btn.querySelector(".vsi-trade-row")) return;
+        if (!tradeUrl && !steamId || !btn.isConnected || btn.querySelector(".vsi-trade-row")) return;
         const row = buildForeignRow(tradeUrl, steamId);
-        if (!row) return;
-        btn.insertBefore(row, btn.firstChild);
-      })().catch((e) => console.error("[VSI] foreign row outer", e));
+        if (row) btn.insertBefore(row, btn.firstChild);
+      })().catch((e) => console.error("[VSI] foreign row", e));
     }
   }
 }
