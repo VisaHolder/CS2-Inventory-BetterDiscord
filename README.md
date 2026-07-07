@@ -8,6 +8,16 @@ Real Doppler phase pricing · live prices in your currency · Trade Offer & Stea
 
 [![Download](https://img.shields.io/badge/download-1a1a1a?style=for-the-badge&labelColor=2ea043)](https://github.com/VisaHolder/steam-inventory-value/releases/latest/download/SteamInventoryValue.plugin.js) &nbsp; [![Release](https://img.shields.io/github/v/release/VisaHolder/steam-inventory-value?style=for-the-badge&labelColor=2d333b&color=5865f2)](https://github.com/VisaHolder/steam-inventory-value/releases/latest) &nbsp; [![License](https://img.shields.io/badge/license-MIT-1a1a1a?style=for-the-badge&labelColor=2d333b)](LICENSE)
 
+<br>
+
+<img src="docs/card.png" width="240" alt="Inventory card with price-history sparkline and top items" />
+&nbsp;
+<img src="docs/card-compact.png" width="240" alt="Compact card mode" />
+&nbsp;
+<img src="docs/card-big.png" width="240" alt="A larger inventory with a downward trend" />
+
+<sub>The card on a profile — full with top items (left), compact mode (middle), and a larger inventory (right). The sparkline is green when the value's up, red when it's down.</sub>
+
 </div>
 
 ---
