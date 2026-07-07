@@ -1046,6 +1046,63 @@ var BUTTON_CSS = `
     box-shadow: 0 2px 10px color-mix(in srgb, var(--brand-500, #5865F2) 40%, transparent);
 }
 .vsi-trade-btn.auto:hover { background: var(--brand-600, #4752C4); }
+
+/* Card is clickable to open the full breakdown */
+.vsi-inv-card:not(.loading) { cursor: pointer; }
+.vsi-inv-card:not(.loading):hover { border-color: rgba(255,255,255,.16); }
+
+/* \u2500\u2500 Full breakdown modal \u2500\u2500 */
+.vsi-modal-backdrop {
+    position: fixed; inset: 0; z-index: 100000;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(0,0,0,.6); backdrop-filter: blur(2px);
+    animation: vsi-fade .12s ease;
+}
+@keyframes vsi-fade { from { opacity: 0; } to { opacity: 1; } }
+.vsi-modal {
+    display: flex; flex-direction: column;
+    width: min(560px, 92vw); max-height: 82vh;
+    background: #1a1b1e; color: #dbdee1;
+    border: 1px solid rgba(255,255,255,.08); border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0,0,0,.6); overflow: hidden;
+}
+.vsi-modal-head {
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 16px; border-bottom: 1px solid rgba(255,255,255,.06);
+}
+.vsi-modal-title { font-size: 15px; font-weight: 700; color: #f2f3f5; flex: 1; min-width: 0; }
+.vsi-modal-title b { color: #fff; }
+.vsi-modal-total { font-variant-numeric: tabular-nums; font-weight: 700; color: #fff; }
+.vsi-modal-x {
+    cursor: pointer; border: 0; background: transparent; color: #b5bac1;
+    font-size: 20px; line-height: 1; padding: 2px 6px; border-radius: 6px;
+}
+.vsi-modal-x:hover { background: rgba(255,255,255,.08); color: #fff; }
+.vsi-modal-tools { display: flex; gap: 8px; padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,.06); }
+.vsi-modal-search {
+    flex: 1; min-width: 0; padding: 7px 10px; border-radius: 7px;
+    background: #111214; color: #dbdee1; border: 1px solid rgba(255,255,255,.08); font-size: 13px;
+}
+.vsi-modal-search::placeholder { color: #72767d; }
+.vsi-modal-sort {
+    cursor: pointer; padding: 7px 12px; border-radius: 7px; font-size: 12px; font-weight: 600;
+    background: #111214; color: #b5bac1; border: 1px solid rgba(255,255,255,.08); white-space: nowrap;
+}
+.vsi-modal-sort:hover { color: #fff; border-color: rgba(255,255,255,.16); }
+.vsi-modal-list { overflow-y: auto; padding: 6px 8px 10px; }
+.vsi-modal-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 8px; border-radius: 8px;
+}
+.vsi-modal-row:hover { background: rgba(255,255,255,.04); }
+.vsi-modal-thumb {
+    width: 44px; height: 34px; flex: none; object-fit: contain;
+    background: rgba(255,255,255,.03); border-radius: 5px;
+}
+.vsi-modal-name { flex: 1; min-width: 0; font-size: 13px; color: #dbdee1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vsi-modal-qty { font-size: 11px; color: #949ba4; flex: none; }
+.vsi-modal-price { font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 600; color: #f2f3f5; flex: none; }
+.vsi-modal-empty { padding: 28px 16px; text-align: center; color: #949ba4; font-size: 13px; }
 `;
 var styleEl = null;
 var observer = null;
@@ -1104,12 +1161,15 @@ function buildButton(shownUserId, isOwn, wantTradeRow, wantCard) {
         `;
     card.addEventListener("click", (e) => {
       const t = e.target;
-      const hit = t?.closest?.(".vsi-refresh, .vsi-load-btn");
-      if (hit) {
+      if (t?.closest?.(".vsi-refresh, .vsi-load-btn")) {
         e.stopPropagation();
         e.preventDefault();
         refreshCard(card, shownUserId, isOwn);
+        return;
       }
+      if (!card.querySelector(".vsi-value")) return;
+      e.stopPropagation();
+      openInventoryModalForUser(shownUserId).catch((err) => console.error("[VSI] open modal", err));
     });
     wrap.appendChild(card);
     populateInventoryCard(card, shownUserId, isOwn).catch((e) => console.error("[VSI] populateInventoryCard", e));
@@ -1392,6 +1452,133 @@ function buildForeignRow(tradeUrl, steamId) {
   }
   return row.children.length ? row : null;
 }
+var steamThumb = (icon) => `https://community.cloudflare.steamstatic.com/economy/image/${icon}/48x48`;
+var modalKeyHandler = null;
+function closeInventoryModal() {
+  document.querySelector(".vsi-modal-backdrop")?.remove();
+  if (modalKeyHandler) {
+    document.removeEventListener("keydown", modalKeyHandler);
+    modalKeyHandler = null;
+  }
+}
+async function openInventoryModal(steamId, displayName) {
+  closeInventoryModal();
+  const cur = settings.store.marketCurrency || 1;
+  const backdrop = document.createElement("div");
+  backdrop.className = "vsi-modal-backdrop";
+  backdrop.addEventListener("click", (e) => {
+    if (e.target === backdrop) closeInventoryModal();
+  });
+  const modal = document.createElement("div");
+  modal.className = "vsi-modal";
+  modal.innerHTML = `
+        <div class="vsi-modal-head">
+            <span class="vsi-modal-title"><b>${escapeHtml(displayName)}</b> \u2014 CS2 Inventory</span>
+            <span class="vsi-modal-total"></span>
+            <button class="vsi-modal-x" title="Close">\xD7</button>
+        </div>
+        <div class="vsi-modal-tools">
+            <input class="vsi-modal-search" type="text" placeholder="Search items\u2026" />
+            <button class="vsi-modal-sort">Sort: Value</button>
+        </div>
+        <div class="vsi-modal-list"><div class="vsi-modal-empty">Loading\u2026</div></div>
+    `;
+  backdrop.appendChild(modal);
+  document.body.appendChild(backdrop);
+  modal.querySelector(".vsi-modal-x").addEventListener("click", closeInventoryModal);
+  modalKeyHandler = (e) => {
+    if (e.key === "Escape") closeInventoryModal();
+  };
+  document.addEventListener("keydown", modalKeyHandler);
+  const itemsSnap = (await getItemsSnaps(steamId))[0];
+  let items = itemsSnap?.items ?? [];
+  let total = itemsSnap?.total ?? 0;
+  let note = "";
+  if (!items.length) {
+    const snap = (await getSnapshots(steamId))[0] ?? await cacheGetInventory(steamId, cur);
+    if (snap?.topItems?.length) {
+      items = snap.topItems.map((t) => ({ name: t.name, price: t.price, qty: 1 }));
+      total = snap.total;
+      note = "Showing top items only \u2014 refresh the inventory card to load every item.";
+    }
+  }
+  if (!backdrop.isConnected) return;
+  const totalEl = modal.querySelector(".vsi-modal-total");
+  const listEl = modal.querySelector(".vsi-modal-list");
+  const searchEl = modal.querySelector(".vsi-modal-search");
+  const sortEl = modal.querySelector(".vsi-modal-sort");
+  totalEl.textContent = fmt(total, cur);
+  let sortMode = "value";
+  let query = "";
+  const render = () => {
+    const filtered = items.filter((i) => !query || abbrevItem(i.name).toLowerCase().includes(query));
+    filtered.sort((a, b) => sortMode === "value" ? b.price * b.qty - a.price * a.qty : abbrevItem(a.name).localeCompare(abbrevItem(b.name)));
+    const rows = filtered.map((i) => `
+            <div class="vsi-modal-row">
+                ${i.icon ? `<img class="vsi-modal-thumb" src="${steamThumb(i.icon)}" loading="lazy" />` : '<div class="vsi-modal-thumb"></div>'}
+                <span class="vsi-modal-name">${escapeHtml(abbrevItem(i.name))}</span>
+                ${i.qty > 1 ? `<span class="vsi-modal-qty">\xD7${i.qty}</span>` : ""}
+                <span class="vsi-modal-price">${fmt(i.price * i.qty, cur)}</span>
+            </div>`).join("");
+    const noteHtml = note ? `<div class="vsi-modal-empty">${escapeHtml(note)}</div>` : "";
+    if (!items.length) {
+      listEl.innerHTML = '<div class="vsi-modal-empty">No snapshot yet \u2014 load this inventory from the profile card, then reopen.</div>';
+      return;
+    }
+    if (!filtered.length) {
+      listEl.innerHTML = '<div class="vsi-modal-empty">No items match your search.</div>';
+      return;
+    }
+    listEl.innerHTML = noteHtml + rows;
+  };
+  render();
+  searchEl.addEventListener("input", () => {
+    query = searchEl.value.trim().toLowerCase();
+    render();
+  });
+  sortEl.addEventListener("click", () => {
+    sortMode = sortMode === "value" ? "name" : "value";
+    sortEl.textContent = sortMode === "value" ? "Sort: Value" : "Sort: Name";
+    render();
+  });
+  searchEl.focus();
+}
+async function openInventoryModalForUser(shownUserId) {
+  const steamId = await getSteamId(shownUserId);
+  if (!steamId) return;
+  const name = UserStore?.getUser?.(shownUserId)?.username ?? "CS2 Inventory";
+  await openInventoryModal(steamId, name);
+}
+var unpatchContextMenu = null;
+function registerContextMenu() {
+  if (!BD.ContextMenu?.patch) return;
+  unpatchContextMenu = BD.ContextMenu.patch("user-context", (ret, props) => {
+    try {
+      const userId = props?.user?.id;
+      if (!userId || !ret?.props?.children) return ret;
+      const item = BD.ContextMenu.buildItem({
+        id: "vsi-inventory",
+        label: "CS2 Inventory",
+        action: () => {
+          openInventoryModalForUser(userId).catch((e) => console.error("[VSI] ctx modal", e));
+        }
+      });
+      const kids = ret.props.children;
+      if (Array.isArray(kids)) kids.push(item);
+      else ret.props.children = [kids, item];
+    } catch (e) {
+      console.error("[VSI] context menu patch", e);
+    }
+    return ret;
+  });
+}
+function unregisterContextMenu() {
+  try {
+    unpatchContextMenu?.();
+  } catch {
+  }
+  unpatchContextMenu = null;
+}
 function scan(root) {
   const sel = '[class*="user-profile-popout"], [class~="user-profile-popout"], [class*="userPopout"], [class*="userProfile"], [class*="userPanelOuter"], [class*="profilePanel"]';
   if (root instanceof HTMLElement && root.matches(sel)) tryInject(root);
@@ -1664,6 +1851,11 @@ module.exports = class SteamInventoryValue {
       console.error("[VSI] registerCommands", e);
     }
     try {
+      registerContextMenu();
+    } catch (e) {
+      console.error("[VSI] registerContextMenu", e);
+    }
+    try {
       cachePushTradeUrl().catch(() => {
       });
     } catch (e) {
@@ -1676,6 +1868,8 @@ module.exports = class SteamInventoryValue {
     styleEl?.remove();
     styleEl = null;
     unregisterCommands();
+    unregisterContextMenu();
+    closeInventoryModal();
     document.querySelectorAll('[data-vsi="1"]').forEach((n) => n.remove());
   }
   getSettingsPanel() {
