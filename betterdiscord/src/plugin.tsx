@@ -2093,11 +2093,26 @@ function scan(root: ParentNode) {
     root.querySelectorAll<HTMLElement>(sel).forEach(tryInject);
 }
 
+// Discord's DOM mutates constantly (messages, typing, animations). Instead of running the popout
+// selector on every added node, we set a flag on any element addition and do ONE scan during the
+// next idle slice — collapsing bursts into a single cheap pass. Profile popouts are still caught
+// within a few hundred ms (imperceptible; the card loads async anyway).
+let scanScheduled = false;
+function scheduleScan() {
+    if (scanScheduled || !observer) return;
+    scanScheduled = true;
+    const run = () => { scanScheduled = false; if (observer) scan(document.body); };
+    const ric = (window as any).requestIdleCallback;
+    if (typeof ric === "function") ric(run, { timeout: 300 });
+    else setTimeout(run, 150);
+}
+
 function startObserver() {
+    scanScheduled = false;
     observer = new MutationObserver(muts => {
         for (const m of muts) {
-            for (const n of Array.from(m.addedNodes)) {
-                if (n instanceof HTMLElement) scan(n);
+            for (const n of m.addedNodes) {
+                if (n instanceof HTMLElement) { scheduleScan(); return; }
             }
         }
     });

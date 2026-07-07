@@ -1852,11 +1852,27 @@ function scan(root) {
   if (root instanceof HTMLElement && root.matches(sel)) tryInject(root);
   root.querySelectorAll(sel).forEach(tryInject);
 }
+var scanScheduled = false;
+function scheduleScan() {
+  if (scanScheduled || !observer) return;
+  scanScheduled = true;
+  const run = () => {
+    scanScheduled = false;
+    if (observer) scan(document.body);
+  };
+  const ric = window.requestIdleCallback;
+  if (typeof ric === "function") ric(run, { timeout: 300 });
+  else setTimeout(run, 150);
+}
 function startObserver() {
+  scanScheduled = false;
   observer = new MutationObserver((muts) => {
     for (const m of muts) {
-      for (const n of Array.from(m.addedNodes)) {
-        if (n instanceof HTMLElement) scan(n);
+      for (const n of m.addedNodes) {
+        if (n instanceof HTMLElement) {
+          scheduleScan();
+          return;
+        }
       }
     }
   });
