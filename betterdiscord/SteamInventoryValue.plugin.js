@@ -199,8 +199,8 @@ var SETTINGS_SCHEMA = {
   },
   includeStickerValue: {
     type: OptionType.BOOLEAN,
-    description: "Add applied-sticker value to each skin's price (a 4\xD7 Katowice holo can be worth more than the gun). Priced from the same market feed \u2014 no extra requests. Turn off for bare skin prices only.",
-    default: true
+    description: "Add applied-sticker value on top of each skin. Off by default \u2014 applied stickers rarely resell for much unless they're very rare, so counting full sticker value overstates what an inventory is actually worth. Turn on only if you want the theoretical sticker-book number.",
+    default: false
   },
   useSharedCache: {
     type: OptionType.BOOLEAN,
@@ -500,7 +500,7 @@ async function loadInventory(steamId, opts) {
   if (assets.length === 0) return empty(true);
   const inv = { assets, descriptions };
   const dopMap = await getDopplerIconMap();
-  const wantStickers = settings.store.includeStickerValue !== false;
+  const wantStickers = settings.store.includeStickerValue === true;
   const metaByKey = /* @__PURE__ */ new Map();
   for (const d of inv.descriptions) {
     const name = d.market_hash_name;

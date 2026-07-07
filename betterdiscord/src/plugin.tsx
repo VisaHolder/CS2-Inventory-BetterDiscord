@@ -205,8 +205,8 @@ const SETTINGS_SCHEMA: Record<string, any> = {
     },
     includeStickerValue: {
         type: OptionType.BOOLEAN,
-        description: "Add applied-sticker value to each skin's price (a 4× Katowice holo can be worth more than the gun). Priced from the same market feed — no extra requests. Turn off for bare skin prices only.",
-        default: true,
+        description: "Add applied-sticker value on top of each skin. Off by default — applied stickers rarely resell for much unless they're very rare, so counting full sticker value overstates what an inventory is actually worth. Turn on only if you want the theoretical sticker-book number.",
+        default: false,
     },
     useSharedCache: {
         type: OptionType.BOOLEAN,
@@ -570,7 +570,7 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
     // We skip those entirely — otherwise we'd hit CSFloat/Steam for nothing and pad the "missing" list.
     // For Dopplers we also resolve the phase from the icon so a Ruby isn't priced as a Phase 3.
     const dopMap = await getDopplerIconMap();
-    const wantStickers = settings.store.includeStickerValue !== false;
+    const wantStickers = settings.store.includeStickerValue === true; // strict opt-in; base value by default
     interface Meta { name: string; marketable: boolean; phase: string | null; paintIndex: number | null; icon: string; stickers: string[] }
     const metaByKey = new Map<string, Meta>();
     for (const d of inv.descriptions) {
