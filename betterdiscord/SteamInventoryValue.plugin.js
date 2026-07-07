@@ -78,6 +78,24 @@ var DataStore = {
     BD.Data.save(PLUGIN_NAME, k, v);
   }
 };
+var ENABLED_USERS_KEY = "vsi.enabledUsers";
+var enabledUsers = /* @__PURE__ */ new Set();
+function loadEnabledUsers() {
+  try {
+    enabledUsers = new Set(BD.Data.load(PLUGIN_NAME, ENABLED_USERS_KEY) ?? []);
+  } catch {
+    enabledUsers = /* @__PURE__ */ new Set();
+  }
+}
+var isCardEnabled = (userId) => enabledUsers.has(userId);
+function setCardEnabled(userId, on) {
+  if (on) enabledUsers.add(userId);
+  else enabledUsers.delete(userId);
+  try {
+    BD.Data.save(PLUGIN_NAME, ENABLED_USERS_KEY, [...enabledUsers]);
+  } catch {
+  }
+}
 async function resolveSteamRef(input) {
   let raw = input.trim().replace(/^@+/, "").replace(/\/+$/, "");
   raw = raw.replace(/^<|>$/g, "");
@@ -144,10 +162,14 @@ var SETTINGS_SCHEMA = {
     description: "Show the Trade + Steam button row on your own profile popout.",
     default: true
   },
-  showInventoryOnProfile: {
-    type: OptionType.BOOLEAN,
-    description: "Show the CS2 Inventory card (value, delta, top 5 items) on profile popouts \u2014 yours and friends'.",
-    default: true
+  inventoryMode: {
+    type: OptionType.SELECT,
+    description: "When to show the CS2 Inventory card on someone's profile. 'Only users I enable' keeps profiles clean \u2014 right-click a user and toggle 'Show CS2 inventory' to turn it on just for them. Your own card always shows unless set to Off.",
+    options: [
+      { label: "Only users I enable (right-click)", value: "enabled", default: true },
+      { label: "Every linked profile", value: "all" },
+      { label: "Off", value: "off" }
+    ]
   },
   // ── Prices ──────────────────────────────────────────────────────────────
   priceSource: {
@@ -1570,10 +1592,11 @@ function tryInject(panel) {
   if (!shownId) return;
   const myId = UserStore.getCurrentUser()?.id;
   const isOwn = shownId === myId;
+  const mode = settings.store.inventoryMode || "enabled";
+  const wantCard = mode === "off" ? false : isOwn ? true : mode === "all" ? true : isCardEnabled(shownId);
   const ownTradeUrl = isOwn ? settings.store.tradeUrl?.trim() : void 0;
   const wantTradeRow = isOwn && !!settings.store.showOnOwnProfile && !!ownTradeUrl;
-  const wantCard = !!settings.store.showInventoryOnProfile;
-  const canRenderForeignTradeRow = !isOwn && !!settings.store.showInventoryOnProfile;
+  const canRenderForeignTradeRow = !isOwn && wantCard;
   if (!wantTradeRow && !wantCard && !canRenderForeignTradeRow) return;
   const inner = panel.querySelector('[class*="inner_"]') ?? panel;
   const target = findInsertionPoint(inner);
@@ -1777,6 +1800,10 @@ async function openInventoryModalForUser(shownUserId) {
   const name = UserStore?.getUser?.(shownUserId)?.username ?? "CS2 Inventory";
   await openInventoryModal(steamId, name);
 }
+function applyCardToggle(userId) {
+  document.querySelectorAll(`[data-vsi-user="${userId}"]`).forEach((n) => n.remove());
+  scan(document.body);
+}
 var unpatchContextMenu = null;
 function registerContextMenu() {
   if (!BD.ContextMenu?.patch) return;
@@ -1784,16 +1811,29 @@ function registerContextMenu() {
     try {
       const userId = props?.user?.id;
       if (!userId || !ret?.props?.children) return ret;
-      const item = BD.ContextMenu.buildItem({
+      const items = [];
+      if ((settings.store.inventoryMode || "enabled") === "enabled") {
+        items.push(BD.ContextMenu.buildItem({
+          type: "toggle",
+          id: "vsi-show-card",
+          label: "Show CS2 inventory",
+          checked: isCardEnabled(userId),
+          action: () => {
+            setCardEnabled(userId, !isCardEnabled(userId));
+            applyCardToggle(userId);
+          }
+        }));
+      }
+      items.push(BD.ContextMenu.buildItem({
         id: "vsi-inventory",
-        label: "CS2 Inventory",
+        label: "CS2 Inventory breakdown",
         action: () => {
           openInventoryModalForUser(userId).catch((e) => console.error("[VSI] ctx modal", e));
         }
-      });
+      }));
       const kids = ret.props.children;
-      if (Array.isArray(kids)) kids.push(item);
-      else ret.props.children = [kids, item];
+      if (Array.isArray(kids)) kids.push(...items);
+      else ret.props.children = [kids, ...items];
     } catch (e) {
       console.error("[VSI] context menu patch", e);
     }
@@ -2084,6 +2124,11 @@ module.exports = class SteamInventoryValue {
       }
     } catch (e) {
       console.error("[VSI] one-time history reset", e);
+    }
+    try {
+      loadEnabledUsers();
+    } catch (e) {
+      console.error("[VSI] loadEnabledUsers", e);
     }
     try {
       ensureStyle();

@@ -68,6 +68,17 @@ const DataStore = {
     set: async (k: string, v: any) => { BD.Data.save(PLUGIN_NAME, k, v); },
 };
 
+// Per-user opt-in for the inventory card (inventoryMode = "enabled"). Toggled from the user
+// right-click menu and persisted, so the card only appears for users you've turned it on for.
+const ENABLED_USERS_KEY = "vsi.enabledUsers";
+let enabledUsers = new Set<string>();
+function loadEnabledUsers() { try { enabledUsers = new Set(BD.Data.load(PLUGIN_NAME, ENABLED_USERS_KEY) ?? []); } catch { enabledUsers = new Set(); } }
+const isCardEnabled = (userId: string): boolean => enabledUsers.has(userId);
+function setCardEnabled(userId: string, on: boolean) {
+    if (on) enabledUsers.add(userId); else enabledUsers.delete(userId);
+    try { BD.Data.save(PLUGIN_NAME, ENABLED_USERS_KEY, [...enabledUsers]); } catch { /* */ }
+}
+
 interface SteamProfile { steamId: string; persona?: string; avatar?: string }
 
 async function resolveSteamRef(input: string): Promise<SteamProfile | null> {
@@ -149,10 +160,14 @@ const SETTINGS_SCHEMA: Record<string, any> = {
         description: "Show the Trade + Steam button row on your own profile popout.",
         default: true,
     },
-    showInventoryOnProfile: {
-        type: OptionType.BOOLEAN,
-        description: "Show the CS2 Inventory card (value, delta, top 5 items) on profile popouts — yours and friends'.",
-        default: true,
+    inventoryMode: {
+        type: OptionType.SELECT,
+        description: "When to show the CS2 Inventory card on someone's profile. 'Only users I enable' keeps profiles clean — right-click a user and toggle 'Show CS2 inventory' to turn it on just for them. Your own card always shows unless set to Off.",
+        options: [
+            { label: "Only users I enable (right-click)", value: "enabled", default: true },
+            { label: "Every linked profile", value: "all" },
+            { label: "Off", value: "off" },
+        ],
     },
 
     // ── Prices ──────────────────────────────────────────────────────────────
@@ -1794,13 +1809,19 @@ function tryInject(panel: HTMLElement) {
     const myId = UserStore.getCurrentUser()?.id;
     const isOwn = shownId === myId;
 
+    // Card visibility: your own always shows (unless Off); foreign profiles show on every linked
+    // profile ("all") or only ones you've opted in via right-click ("enabled").
+    const mode = (settings.store.inventoryMode as string) || "enabled";
+    const wantCard = mode === "off" ? false
+        : isOwn ? true
+        : mode === "all" ? true
+        : isCardEnabled(shownId);
+
     // Own-profile trade URL comes from plugin settings; foreign trade URL comes from their bio (async).
     const ownTradeUrl = isOwn ? settings.store.tradeUrl?.trim() : undefined;
     const wantTradeRow = isOwn && !!settings.store.showOnOwnProfile && !!ownTradeUrl;
-    const wantCard = !!settings.store.showInventoryOnProfile;
-    // Also willing to render a trade row for a foreign user IF their bio has a trade URL — we resolve that
-    // asynchronously after injecting the card (so the popout doesn't block on a REST call).
-    const canRenderForeignTradeRow = !isOwn && !!settings.store.showInventoryOnProfile;
+    // Foreign trade row rides along with the card — only when the card is allowed for this user.
+    const canRenderForeignTradeRow = !isOwn && wantCard;
     if (!wantTradeRow && !wantCard && !canRenderForeignTradeRow) return;
 
     const inner = panel.querySelector<HTMLElement>('[class*="inner_"]') ?? panel;
@@ -2021,6 +2042,13 @@ async function openInventoryModalForUser(shownUserId: string) {
     await openInventoryModal(steamId, name);
 }
 
+// Re-evaluate injection for one user after toggling their card on/off: drop any existing card and
+// re-scan open popouts (tryInject re-adds it only if the user is now enabled).
+function applyCardToggle(userId: string) {
+    document.querySelectorAll(`[data-vsi-user="${userId}"]`).forEach(n => n.remove());
+    scan(document.body);
+}
+
 // ─── Right-click user context menu → CS2 Inventory ─────────────────────────────
 let unpatchContextMenu: (() => void) | null = null;
 function registerContextMenu() {
@@ -2029,14 +2057,26 @@ function registerContextMenu() {
         try {
             const userId = props?.user?.id;
             if (!userId || !ret?.props?.children) return ret;
-            const item = BD.ContextMenu.buildItem({
+            const items: any[] = [];
+            // In opt-in mode, a per-user toggle to show/hide the card on their profile.
+            if (((settings.store.inventoryMode as string) || "enabled") === "enabled") {
+                items.push(BD.ContextMenu.buildItem({
+                    type: "toggle",
+                    id: "vsi-show-card",
+                    label: "Show CS2 inventory",
+                    checked: isCardEnabled(userId),
+                    action: () => { setCardEnabled(userId, !isCardEnabled(userId)); applyCardToggle(userId); },
+                }));
+            }
+            // Always: open the full breakdown for a one-off look, no matter the mode.
+            items.push(BD.ContextMenu.buildItem({
                 id: "vsi-inventory",
-                label: "CS2 Inventory",
+                label: "CS2 Inventory breakdown",
                 action: () => { openInventoryModalForUser(userId).catch(e => console.error("[VSI] ctx modal", e)); },
-            });
+            }));
             const kids = ret.props.children;
-            if (Array.isArray(kids)) kids.push(item);
-            else ret.props.children = [kids, item];
+            if (Array.isArray(kids)) kids.push(...items);
+            else ret.props.children = [kids, ...items];
         } catch (e) { console.error("[VSI] context menu patch", e); }
         return ret;
     });
@@ -2338,6 +2378,7 @@ module.exports = class SteamInventoryValue {
                 BD.Data.save(PLUGIN_NAME, "vsi.histResetV1", true);
             }
         } catch (e) { console.error("[VSI] one-time history reset", e); }
+        try { loadEnabledUsers(); } catch (e) { console.error("[VSI] loadEnabledUsers", e); }
         try { ensureStyle(); } catch (e) { console.error("[VSI] ensureStyle", e); }
         try { startObserver(); } catch (e) { console.error("[VSI] startObserver", e); }
         try { registerCommands(); } catch (e) { console.error("[VSI] registerCommands", e); }
