@@ -230,6 +230,12 @@ const SETTINGS_SCHEMA: Record<string, any> = {
         default: "",
         placeholder: "CSFloat API key",
     },
+    steamWebApiToken: {
+        type: OptionType.STRING,
+        description: "Optional Steam web token for YOUR OWN inventory. Steam's public inventory hides trade-held / restricted items (e.g. gloves & knives on a 7-day hold) from everyone but you — set this and your own card shows your FULL inventory. Get it (logged into Steam) from steamcommunity.com/pointssummary/ajaxgetasyncconfig and paste the webapi_token value. Read-only, your inventory only, expires ~24h — re-paste when items go missing.",
+        default: "",
+        placeholder: "webapi_token (eyJ0eXAiOi...)",
+    },
     includeStickerValue: {
         type: OptionType.BOOLEAN,
         description: "Add applied-sticker value on top of each skin. Off by default — applied stickers rarely resell for much unless they're very rare, so counting full sticker value overstates what an inventory is actually worth. Turn on only if you want the theoretical sticker-book number.",
@@ -633,6 +639,16 @@ async function getCsfloatPhasePrice(marketHashName: string, paintIndex: number):
     }
 }
 
+// A Steam webapi_token's owner SteamID (its JWT `sub`). Used to detect "this is my own inventory".
+function base64UrlDecode(s: string): string {
+    s = s.replace(/-/g, "+").replace(/_/g, "/");
+    while (s.length % 4) s += "=";
+    return atob(s);
+}
+function tokenSteamId(token: string): string | null {
+    try { const p = JSON.parse(base64UrlDecode(token.split(".")[1] || "")); return typeof p?.sub === "string" ? p.sub : null; } catch { return null; }
+}
+
 async function loadInventory(steamId: string, opts: PricingOptions): Promise<InventoryResult> {
     const empty = (isPriv: boolean): InventoryResult => ({
         total: 0, priced: 0, count: 0, marketableCount: 0, uniqueNames: 0, isPrivate: isPriv, topItems: [], allItems: [], owned: {}, stickerTotal: 0, unpriced: [], skippedNonMarketable: 0,
@@ -643,34 +659,45 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
     // everything past that page (knives, gloves, and any newly-added item can land off-page).
     // We must pass count=2000 (Valve's per-request max; higher 400s) AND follow the `last_assetid`
     // cursor until the inventory is exhausted.
-    const base = `https://steamcommunity.com/inventory/${steamId}/730/2?l=english&count=2000`;
     const assets: any[] = [];
     const descriptions: any[] = [];
-    const assetProps: any[] = []; // per-asset float/seed — Steam returns these publicly for ANY inventory
+    const assetProps: any[] = []; // per-asset float/seed/nametag/inspect — returned for ANY public inventory
     const seenDesc = new Set<string>();
-    let startAssetId: string | undefined;
-    let pages = 0;
-    try {
+
+    // Own inventory + a valid webapi_token → the AUTHENTICATED endpoint, which returns the FULL
+    // inventory including trade-held / restricted items (gloves, knives on a hold) that the public
+    // endpoint hides from anonymous viewers. Everyone else (and if the token is missing/expired)
+    // uses the public endpoint. Both paginate the same way (more_items / last_assetid).
+    const token = (settings.store.steamWebApiToken || "").trim();
+    const useAuth = !!token && tokenSteamId(token) === steamId;
+    const urlFor = (auth: boolean, start?: string): string => auth
+        ? `https://api.steampowered.com/IEconService/GetInventoryItemsWithDescriptions/v1/?${new URLSearchParams({ access_token: token, steamid: steamId, appid: "730", contextid: "2", get_descriptions: "true", get_asset_properties: "true", count: "2000", ...(start ? { start_assetid: start } : {}) })}`
+        : `https://steamcommunity.com/inventory/${steamId}/730/2?l=english&count=2000${start ? `&start_assetid=${start}` : ""}`;
+    const paginate = async (auth: boolean): Promise<void> => {
+        let start: string | undefined; let pages = 0;
         do {
-            const url = startAssetId ? `${base}&start_assetid=${startAssetId}` : base;
-            const page: any = await fetchJson(url);
-            if (!page?.assets || !page?.descriptions) {
-                if (pages === 0) return empty(true); // first page blocked → private / no CS2 inventory
-                break;
-            }
+            const raw: any = await fetchJson(urlFor(auth, start));
+            const page: any = auth ? (raw?.response ?? {}) : raw;
+            if (!page?.assets || !page?.descriptions) break; // blocked / empty page
             assets.push(...page.assets);
             if (Array.isArray(page.asset_properties)) assetProps.push(...page.asset_properties);
             for (const d of page.descriptions) {
                 const k = `${d.classid}_${d.instanceid}`;
                 if (!seenDesc.has(k)) { seenDesc.add(k); descriptions.push(d); }
             }
-            startAssetId = page.more_items ? String(page.last_assetid) : undefined;
+            start = page.more_items ? String(page.last_assetid) : undefined;
             pages++;
-            if (startAssetId) await sleep(600); // be gentle — Steam rate-limits inventory requests
-        } while (startAssetId && pages < 8);
-    } catch (e: any) {
-        if (String(e?.message || e).includes("403")) return empty(true);
-        if (assets.length === 0) throw e; // nothing fetched → surface the error; else price partial
+            if (start) await sleep(auth ? 300 : 600); // be gentle — Steam rate-limits inventory requests
+        } while (start && pages < 8);
+    };
+
+    if (useAuth) { try { await paginate(true); } catch { /* token expired/invalid → fall back to public */ } }
+    if (assets.length === 0) {
+        try { await paginate(false); }
+        catch (e: any) {
+            if (String(e?.message || e).includes("403")) return empty(true);
+            if (assets.length === 0) throw e; // nothing fetched → surface the error; else price partial
+        }
     }
     if (assets.length === 0) return empty(true);
     const inv = { assets, descriptions };
@@ -704,7 +731,7 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
         const typeTag = (d.tags ?? []).find((t: any) => t.category === "Type")?.internal_name ?? "";
         metaByKey.set(`${d.classid}_${d.instanceid}`, {
             name,
-            marketable: d.marketable === 1 || d.marketable === "1",
+            marketable: d.marketable === 1 || d.marketable === "1" || d.marketable === true, // public: 0/1, authed: boolean
             phase: dp?.phase ?? null,
             paintIndex: dp?.paintIndex ?? null,
             icon: d.icon_url ?? "",
@@ -2556,6 +2583,13 @@ function buildSettingsPanel(): any {
             // Share your trade URL to the cache the moment you set it, so other addon users
             // see a Trade button on your profile right away.
             if (id === "tradeUrl" || id === "useSharedCache" || id === "shareTradeUrl") cachePushTradeUrl().catch(() => { /* best-effort */ });
+            // Paste a webapi_token → re-price your own inventory so trade-held items (gloves/knives) appear.
+            if (id === "steamWebApiToken" && typeof value === "string" && value.trim()) {
+                const sid = tokenSteamId(value.trim());
+                if (sid) priceSteamId(sid)
+                    .then(() => { try { BD.UI?.showToast?.("Loaded your full inventory (held items included).", { type: "success" }); } catch { /* */ } })
+                    .catch(() => { try { BD.UI?.showToast?.("Couldn't load — token may be invalid or expired.", { type: "error" }); } catch { /* */ } });
+            }
             if (id === "resetHistory" && value === true) {
                 const n = clearAllHistory();
                 (settings.store as any).resetHistory = false;

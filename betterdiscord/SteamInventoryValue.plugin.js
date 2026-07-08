@@ -521,6 +521,12 @@ var SETTINGS_SCHEMA = {
     default: "",
     placeholder: "CSFloat API key"
   },
+  steamWebApiToken: {
+    type: OptionType.STRING,
+    description: "Optional Steam web token for YOUR OWN inventory. Steam's public inventory hides trade-held / restricted items (e.g. gloves & knives on a 7-day hold) from everyone but you \u2014 set this and your own card shows your FULL inventory. Get it (logged into Steam) from steamcommunity.com/pointssummary/ajaxgetasyncconfig and paste the webapi_token value. Read-only, your inventory only, expires ~24h \u2014 re-paste when items go missing.",
+    default: "",
+    placeholder: "webapi_token (eyJ0eXAiOi...)"
+  },
   includeStickerValue: {
     type: OptionType.BOOLEAN,
     description: "Add applied-sticker value on top of each skin. Off by default \u2014 applied stickers rarely resell for much unless they're very rare, so counting full sticker value overstates what an inventory is actually worth. Turn on only if you want the theoretical sticker-book number.",
@@ -861,6 +867,19 @@ async function getCsfloatPhasePrice(marketHashName, paintIndex) {
     return null;
   }
 }
+function base64UrlDecode(s) {
+  s = s.replace(/-/g, "+").replace(/_/g, "/");
+  while (s.length % 4) s += "=";
+  return atob(s);
+}
+function tokenSteamId(token) {
+  try {
+    const p = JSON.parse(base64UrlDecode(token.split(".")[1] || ""));
+    return typeof p?.sub === "string" ? p.sub : null;
+  } catch {
+    return null;
+  }
+}
 async function loadInventory(steamId, opts) {
   const empty = (isPriv) => ({
     total: 0,
@@ -876,21 +895,20 @@ async function loadInventory(steamId, opts) {
     unpriced: [],
     skippedNonMarketable: 0
   });
-  const base = `https://steamcommunity.com/inventory/${steamId}/730/2?l=english&count=2000`;
   const assets = [];
   const descriptions = [];
   const assetProps = [];
   const seenDesc = /* @__PURE__ */ new Set();
-  let startAssetId;
-  let pages = 0;
-  try {
+  const token = (settings.store.steamWebApiToken || "").trim();
+  const useAuth = !!token && tokenSteamId(token) === steamId;
+  const urlFor = (auth, start) => auth ? `https://api.steampowered.com/IEconService/GetInventoryItemsWithDescriptions/v1/?${new URLSearchParams({ access_token: token, steamid: steamId, appid: "730", contextid: "2", get_descriptions: "true", get_asset_properties: "true", count: "2000", ...start ? { start_assetid: start } : {} })}` : `https://steamcommunity.com/inventory/${steamId}/730/2?l=english&count=2000${start ? `&start_assetid=${start}` : ""}`;
+  const paginate = async (auth) => {
+    let start;
+    let pages = 0;
     do {
-      const url = startAssetId ? `${base}&start_assetid=${startAssetId}` : base;
-      const page = await fetchJson(url);
-      if (!page?.assets || !page?.descriptions) {
-        if (pages === 0) return empty(true);
-        break;
-      }
+      const raw = await fetchJson(urlFor(auth, start));
+      const page = auth ? raw?.response ?? {} : raw;
+      if (!page?.assets || !page?.descriptions) break;
       assets.push(...page.assets);
       if (Array.isArray(page.asset_properties)) assetProps.push(...page.asset_properties);
       for (const d of page.descriptions) {
@@ -900,13 +918,24 @@ async function loadInventory(steamId, opts) {
           descriptions.push(d);
         }
       }
-      startAssetId = page.more_items ? String(page.last_assetid) : void 0;
+      start = page.more_items ? String(page.last_assetid) : void 0;
       pages++;
-      if (startAssetId) await sleep(600);
-    } while (startAssetId && pages < 8);
-  } catch (e) {
-    if (String(e?.message || e).includes("403")) return empty(true);
-    if (assets.length === 0) throw e;
+      if (start) await sleep(auth ? 300 : 600);
+    } while (start && pages < 8);
+  };
+  if (useAuth) {
+    try {
+      await paginate(true);
+    } catch {
+    }
+  }
+  if (assets.length === 0) {
+    try {
+      await paginate(false);
+    } catch (e) {
+      if (String(e?.message || e).includes("403")) return empty(true);
+      if (assets.length === 0) throw e;
+    }
   }
   if (assets.length === 0) return empty(true);
   const inv = { assets, descriptions };
@@ -935,7 +964,8 @@ async function loadInventory(steamId, opts) {
     const typeTag = (d.tags ?? []).find((t) => t.category === "Type")?.internal_name ?? "";
     metaByKey.set(`${d.classid}_${d.instanceid}`, {
       name,
-      marketable: d.marketable === 1 || d.marketable === "1",
+      marketable: d.marketable === 1 || d.marketable === "1" || d.marketable === true,
+      // public: 0/1, authed: boolean
       phase: dp?.phase ?? null,
       paintIndex: dp?.paintIndex ?? null,
       icon: d.icon_url ?? "",
@@ -985,20 +1015,20 @@ async function loadInventory(steamId, opts) {
   const stickerByGroup = /* @__PURE__ */ new Map();
   const hasKey = !!(settings.store.csfloatApiKey || "").trim();
   for (const [gk, g] of groups) {
-    let base2 = null;
+    let base = null;
     if (g.phase && g.paintIndex != null && hasKey) {
-      base2 = await getCsfloatPhasePrice(g.name, g.paintIndex);
+      base = await getCsfloatPhasePrice(g.name, g.paintIndex);
       await sleep(350);
     }
-    if (base2 == null) base2 = priceByName.get(g.name) ?? null;
-    if (base2 == null) continue;
+    if (base == null) base = priceByName.get(g.name) ?? null;
+    if (base == null) continue;
     const isSouvenir = /^Souvenir /.test(g.name);
     let stickerVal = 0;
     if (!isSouvenir) for (const sn of g.stickers) {
       const sp = bulk.get(sn);
       if (sp && sp > 0) stickerVal += sp;
     }
-    priceByGroup.set(gk, base2 + stickerVal);
+    priceByGroup.set(gk, base + stickerVal);
     if (stickerVal > 0) stickerByGroup.set(gk, { value: stickerVal, count: g.stickers.length });
   }
   const buildResult = () => {
@@ -2584,6 +2614,20 @@ function buildSettingsPanel() {
       settings.store[id] = value;
       if (id === "tradeUrl" || id === "useSharedCache" || id === "shareTradeUrl") cachePushTradeUrl().catch(() => {
       });
+      if (id === "steamWebApiToken" && typeof value === "string" && value.trim()) {
+        const sid = tokenSteamId(value.trim());
+        if (sid) priceSteamId(sid).then(() => {
+          try {
+            BD.UI?.showToast?.("Loaded your full inventory (held items included).", { type: "success" });
+          } catch {
+          }
+        }).catch(() => {
+          try {
+            BD.UI?.showToast?.("Couldn't load \u2014 token may be invalid or expired.", { type: "error" });
+          } catch {
+          }
+        });
+      }
       if (id === "resetHistory" && value === true) {
         const n = clearAllHistory();
         settings.store.resetHistory = false;
