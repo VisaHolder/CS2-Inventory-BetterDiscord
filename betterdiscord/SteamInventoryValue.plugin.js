@@ -280,6 +280,11 @@ var SETTINGS_SCHEMA = {
     description: "When you open a profile whose price is stale, silently re-price it in the background and update the card in place \u2014 no STALE tag, no manual refresh.",
     default: false
   },
+  backgroundRefresh: {
+    type: OptionType.BOOLEAN,
+    description: "Keep recently-viewed profiles freshly priced on a timer (a few every ~6h), so the gain/loss chip has a real data point at your chosen window \u2014 a true 24h change, consistent on every card. Light: a handful of price fetches spaced out, no constant CPU use. Turn off to only price profiles when you open them.",
+    default: true
+  },
   resetHistory: {
     type: OptionType.BOOLEAN,
     description: "Wipe all stored price snapshots (deltas, sparkline, and diff) for every profile and start fresh. Flip on to clear \u2014 it resets itself right after.",
@@ -730,7 +735,7 @@ var getItemsSnapsSync = (steamId) => BD.Data.load(PLUGIN_NAME, itemsKey(steamId)
 async function pushSnapshot(steamId, snap) {
   const list = await getSnapshots(steamId);
   list.unshift(snap);
-  await DataStore.set(snapKey(steamId), list.slice(0, 20));
+  await DataStore.set(snapKey(steamId), list.slice(0, 40));
 }
 var itemsKey = (steamId) => `vsi.items.${steamId}`;
 async function getItemsSnaps(steamId) {
@@ -1425,11 +1430,11 @@ async function runInventoryForUser(shownUserId, onBackgroundUpdate) {
   const name = UserStore?.getUser?.(shownUserId)?.username;
   await priceSteamId(steamId, name, onBackgroundUpdate);
 }
-async function priceSteamId(steamId, name, onBackgroundUpdate) {
+async function priceSteamId(steamId, name, onBackgroundUpdate, noLiveFallback = false) {
   const validSources = /* @__PURE__ */ new Set(["csfloat", "skinport", "live_steam"]);
   const stored = settings.store.priceSource;
   const source = validSources.has(stored) ? stored : "csfloat";
-  const useLiveFallback = !!settings.store.useLiveSteamFallback;
+  const useLiveFallback = !noLiveFallback && !!settings.store.useLiveSteamFallback;
   const cur = settings.store.marketCurrency || 1;
   const snapFrom = (r) => ({
     total: r.total,
@@ -1568,6 +1573,63 @@ function maybeAutoRefresh(card, latest, shownUserId, isOwn) {
   if (Date.now() - latest.ts <= staleH * 36e5) return;
   refreshCard(card, shownUserId, isOwn).catch(() => {
   });
+}
+var bgTimer = null;
+var bgSeedTimer = null;
+var bgRunning = false;
+var BG_CHECK_INTERVAL = 30 * 6e4;
+var BG_STALE_MS = 6 * 36e5;
+var BG_RELEVANT_MS = 7 * 24 * 36e5;
+var BG_MAX_PER_TICK = 5;
+function trackedSteamIds() {
+  try {
+    const fs = require("fs");
+    const folder = BD.Plugins?.folder;
+    const cfg = folder ? `${folder}/${PLUGIN_NAME}.config.json` : null;
+    if (!cfg || !fs.existsSync(cfg)) return [];
+    const data = JSON.parse(fs.readFileSync(cfg, "utf8"));
+    return Object.keys(data).filter((k) => k.startsWith("vsi.snap.")).map((k) => k.slice("vsi.snap.".length));
+  } catch {
+    return [];
+  }
+}
+async function backgroundTick() {
+  if (settings.store.backgroundRefresh === false || bgRunning) return;
+  bgRunning = true;
+  try {
+    const now = Date.now();
+    const stale = trackedSteamIds().map((steamId) => ({ steamId, age: now - (getSnapshotsSync(steamId)[0]?.ts ?? 0) })).filter((x) => x.age > BG_STALE_MS && x.age < BG_RELEVANT_MS).sort((a, b) => b.age - a.age).slice(0, BG_MAX_PER_TICK);
+    for (const { steamId } of stale) {
+      try {
+        await priceSteamId(steamId, void 0, void 0, true);
+      } catch {
+      }
+      await sleep(3e3);
+    }
+  } finally {
+    bgRunning = false;
+  }
+}
+function startBackgroundRefresh() {
+  if (bgTimer) return;
+  bgTimer = setInterval(() => {
+    backgroundTick().catch(() => {
+    });
+  }, BG_CHECK_INTERVAL);
+  bgSeedTimer = setTimeout(() => {
+    backgroundTick().catch(() => {
+    });
+  }, 9e4);
+}
+function stopBackgroundRefresh() {
+  if (bgTimer) {
+    clearInterval(bgTimer);
+    bgTimer = null;
+  }
+  if (bgSeedTimer) {
+    clearTimeout(bgSeedTimer);
+    bgSeedTimer = null;
+  }
 }
 function rarityDotHtml(color) {
   if (!color || !/^[0-9a-f]{3}([0-9a-f]{3})?$/i.test(color)) return "";
@@ -2367,6 +2429,11 @@ module.exports = class SteamInventoryValue {
       console.error("[VSI] registerContextMenu", e);
     }
     try {
+      startBackgroundRefresh();
+    } catch (e) {
+      console.error("[VSI] startBackgroundRefresh", e);
+    }
+    try {
       cachePushTradeUrl().catch(() => {
       });
     } catch (e) {
@@ -2376,6 +2443,7 @@ module.exports = class SteamInventoryValue {
   stop() {
     observer?.disconnect();
     observer = null;
+    stopBackgroundRefresh();
     styleEl?.remove();
     styleEl = null;
     unregisterCommands();

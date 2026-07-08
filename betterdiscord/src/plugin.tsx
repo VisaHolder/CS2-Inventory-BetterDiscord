@@ -283,6 +283,11 @@ const SETTINGS_SCHEMA: Record<string, any> = {
         description: "When you open a profile whose price is stale, silently re-price it in the background and update the card in place — no STALE tag, no manual refresh.",
         default: false,
     },
+    backgroundRefresh: {
+        type: OptionType.BOOLEAN,
+        description: "Keep recently-viewed profiles freshly priced on a timer (a few every ~6h), so the gain/loss chip has a real data point at your chosen window — a true 24h change, consistent on every card. Light: a handful of price fetches spaced out, no constant CPU use. Turn off to only price profiles when you open them.",
+        default: true,
+    },
     resetHistory: {
         type: OptionType.BOOLEAN,
         description: "Wipe all stored price snapshots (deltas, sparkline, and diff) for every profile and start fresh. Flip on to clear — it resets itself right after.",
@@ -835,7 +840,8 @@ const getItemsSnapsSync = (steamId: string): ItemsSnapshot[] => BD.Data.load(PLU
 async function pushSnapshot(steamId: string, snap: Snapshot) {
     const list = await getSnapshots(steamId);
     list.unshift(snap);
-    await DataStore.set(snapKey(steamId), list.slice(0, 20));
+    // Keep ~10 days at the 6h background cadence, so even a 7-day delta window has a data point.
+    await DataStore.set(snapKey(steamId), list.slice(0, 40));
 }
 
 // Full priced item lists are heavy (hundreds of entries), so they live apart from the light
@@ -1600,11 +1606,12 @@ async function runInventoryForUser(shownUserId: string, onBackgroundUpdate?: () 
 // Prices a SteamID directly, persists the snapshot + full item list, shares to the cache, and
 // returns the result. `onBackgroundUpdate` (when given) runs the slow Steam fallback in the
 // background and fires once it lands. Used by the card, the modal, and the context menu.
-async function priceSteamId(steamId: string, name?: string, onBackgroundUpdate?: () => void): Promise<InventoryResult> {
+async function priceSteamId(steamId: string, name?: string, onBackgroundUpdate?: () => void, noLiveFallback = false): Promise<InventoryResult> {
     const validSources = new Set(["csfloat", "skinport", "live_steam"]);
     const stored = settings.store.priceSource as string;
     const source = validSources.has(stored) ? stored : "csfloat";
-    const useLiveFallback = !!settings.store.useLiveSteamFallback;
+    // The scheduled background refresh skips the slow per-item Steam fallback to stay light.
+    const useLiveFallback = !noLiveFallback && !!settings.store.useLiveSteamFallback;
     const cur = settings.store.marketCurrency || 1;
 
     const snapFrom = (r: InventoryResult): Snapshot => ({
@@ -1757,6 +1764,60 @@ function maybeAutoRefresh(card: HTMLElement, latest: Snapshot, shownUserId: stri
     const staleH = settings.store.snapshotStalenessHours || 6; // still auto-refresh even if the STALE display is off
     if (Date.now() - latest.ts <= staleH * 3_600_000) return;
     refreshCard(card, shownUserId, isOwn).catch(() => { /* */ });
+}
+
+// ─── Scheduled background refresh ───────────────────────────────────────────────
+// Re-prices recently-viewed profiles on a timer so every tracked card has a real data point at the
+// delta window (a true, consistent 24h change). Deliberately light: it checks every 30 min and
+// prices only a few STALE profiles per check (spaced out), so at steady state each profile is
+// re-priced ~every 6h with no continuous CPU use. Profiles you haven't viewed in a week age out.
+let bgTimer: ReturnType<typeof setInterval> | null = null;
+let bgSeedTimer: ReturnType<typeof setTimeout> | null = null;
+let bgRunning = false;
+const BG_CHECK_INTERVAL = 30 * 60_000;      // how often to look for stale profiles
+const BG_STALE_MS = 6 * 3_600_000;          // re-price a profile once its latest snapshot is older than this
+const BG_RELEVANT_MS = 7 * 24 * 3_600_000;  // stop re-pricing profiles not viewed in this long
+const BG_MAX_PER_TICK = 5;                  // cap price fetches per check so it never bursts
+
+// SteamIDs we hold snapshots for (i.e. profiles that have been priced at least once).
+function trackedSteamIds(): string[] {
+    try {
+        const fs = require("fs");
+        const folder = (BD as any).Plugins?.folder;
+        const cfg = folder ? `${folder}/${PLUGIN_NAME}.config.json` : null;
+        if (!cfg || !fs.existsSync(cfg)) return [];
+        const data = JSON.parse(fs.readFileSync(cfg, "utf8"));
+        return Object.keys(data).filter(k => k.startsWith("vsi.snap.")).map(k => k.slice("vsi.snap.".length));
+    } catch { return []; }
+}
+
+async function backgroundTick() {
+    if (settings.store.backgroundRefresh === false || bgRunning) return;
+    bgRunning = true;
+    try {
+        const now = Date.now();
+        const stale = trackedSteamIds()
+            .map(steamId => ({ steamId, age: now - (getSnapshotsSync(steamId)[0]?.ts ?? 0) }))
+            .filter(x => x.age > BG_STALE_MS && x.age < BG_RELEVANT_MS)
+            .sort((a, b) => b.age - a.age)     // most stale first
+            .slice(0, BG_MAX_PER_TICK);
+        for (const { steamId } of stale) {
+            try { await priceSteamId(steamId, undefined, undefined, true); } // no name, no callback, skip live fallback
+            catch { /* private / transient — skip, try again next cycle */ }
+            await sleep(3000); // gentle spacing between profiles
+        }
+    } finally { bgRunning = false; }
+}
+
+function startBackgroundRefresh() {
+    if (bgTimer) return;
+    bgTimer = setInterval(() => { backgroundTick().catch(() => { /* */ }); }, BG_CHECK_INTERVAL);
+    bgSeedTimer = setTimeout(() => { backgroundTick().catch(() => { /* */ }); }, 90_000); // first pass ~90s after load
+}
+
+function stopBackgroundRefresh() {
+    if (bgTimer) { clearInterval(bgTimer); bgTimer = null; }
+    if (bgSeedTimer) { clearTimeout(bgSeedTimer); bgSeedTimer = null; }
 }
 
 // A small rarity dot in the item's CS2 grade color, if we know it (hex from Steam's name_color).
@@ -2625,6 +2686,7 @@ module.exports = class SteamInventoryValue {
         try { startObserver(); } catch (e) { console.error("[VSI] startObserver", e); }
         try { registerCommands(); } catch (e) { console.error("[VSI] registerCommands", e); }
         try { registerContextMenu(); } catch (e) { console.error("[VSI] registerContextMenu", e); }
+        try { startBackgroundRefresh(); } catch (e) { console.error("[VSI] startBackgroundRefresh", e); }
         // Re-publish your trade URL each launch so it stays live in the shared cache.
         try { cachePushTradeUrl().catch(() => { /* best-effort */ }); } catch (e) { console.error("[VSI] cachePushTradeUrl", e); }
     }
@@ -2632,6 +2694,7 @@ module.exports = class SteamInventoryValue {
     stop() {
         observer?.disconnect();
         observer = null;
+        stopBackgroundRefresh();
         styleEl?.remove();
         styleEl = null;
         unregisterCommands();
