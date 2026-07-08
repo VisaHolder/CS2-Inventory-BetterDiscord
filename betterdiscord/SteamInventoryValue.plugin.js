@@ -62,7 +62,13 @@ var settings = {
     get: (_t, key) => {
       const all = loadSettings();
       if (key in all) return all[key];
-      return SETTINGS_SCHEMA[key]?.default;
+      const def = SETTINGS_SCHEMA[key];
+      if (!def) return void 0;
+      if (def.type === OptionType.SELECT) {
+        const opt = (def.options || []).find((o) => o.default);
+        return opt ? opt.value : def.options?.[0]?.value;
+      }
+      return def.default;
     },
     set: (_t, key, val) => {
       const all = loadSettings();

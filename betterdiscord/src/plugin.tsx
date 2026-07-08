@@ -54,7 +54,16 @@ const settings = {
         get: (_t, key: string) => {
             const all = loadSettings();
             if (key in all) return all[key];
-            return (SETTINGS_SCHEMA as any)[key]?.default;
+            const def = (SETTINGS_SCHEMA as any)[key];
+            if (!def) return undefined;
+            // SELECT defaults live on the chosen OPTION (`default: true`), not the schema entry —
+            // resolve them here so an unset dropdown reports its real default instead of undefined
+            // (which silently fell through to per-call `|| fallback`s, e.g. the delta window → 1h).
+            if (def.type === OptionType.SELECT) {
+                const opt = (def.options || []).find((o: any) => o.default);
+                return opt ? opt.value : def.options?.[0]?.value;
+            }
+            return def.default;
         },
         set: (_t, key: string, val: any) => {
             const all = loadSettings(); all[key] = val;
