@@ -1,10 +1,10 @@
 import { build } from "esbuild";
 
 const META = `/**
- * @name SteamInventoryValue
+ * @name CS2Inventory
  * @author VisaHolder
  * @description CS2 inventory value on Discord profile popouts — Doppler/Gamma phase pricing (CSFloat), FX-converted prices, and Trade Offer / Steam buttons.
- * @version 1.5.3
+ * @version 1.5.4
  * @source https://github.com/VisaHolder/cs2-inventory-betterdiscord
  * @website https://github.com/VisaHolder/cs2-inventory-betterdiscord
  */
@@ -16,9 +16,9 @@ await build({
     format: "cjs",
     platform: "browser",
     target: ["chrome120"],
-    outfile: "SteamInventoryValue.plugin.js",
+    outfile: "CS2Inventory.plugin.js",
     banner: { js: META },
     legalComments: "none",
     logLevel: "info",
 });
-console.log("built SteamInventoryValue.plugin.js");
+console.log("built CS2Inventory.plugin.js");

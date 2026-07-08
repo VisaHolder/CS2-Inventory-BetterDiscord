@@ -6,7 +6,7 @@
 
 Real floats & paint seeds · Doppler phase pricing · live prices in your currency · Trade Offer & Steam buttons · a shared cache so it loads instantly for everyone.
 
-[![Download](https://img.shields.io/badge/download-1a1a1a?style=for-the-badge&labelColor=2ea043)](https://github.com/VisaHolder/cs2-inventory-betterdiscord/releases/latest/download/SteamInventoryValue.plugin.js) &nbsp; [![Release](https://img.shields.io/github/v/release/VisaHolder/cs2-inventory-betterdiscord?style=for-the-badge&labelColor=2d333b&color=5865f2)](https://github.com/VisaHolder/cs2-inventory-betterdiscord/releases/latest) &nbsp; [![License](https://img.shields.io/badge/license-MIT-1a1a1a?style=for-the-badge&labelColor=2d333b)](LICENSE)
+[![Download](https://img.shields.io/badge/download-1a1a1a?style=for-the-badge&labelColor=2ea043)](https://github.com/VisaHolder/cs2-inventory-betterdiscord/releases/latest/download/CS2Inventory.plugin.js) &nbsp; [![Release](https://img.shields.io/github/v/release/VisaHolder/cs2-inventory-betterdiscord?style=for-the-badge&labelColor=2d333b&color=5865f2)](https://github.com/VisaHolder/cs2-inventory-betterdiscord/releases/latest) &nbsp; [![License](https://img.shields.io/badge/license-MIT-1a1a1a?style=for-the-badge&labelColor=2d333b)](LICENSE)
 
 <br>
 
@@ -23,9 +23,9 @@ Real floats & paint seeds · Doppler phase pricing · live prices in your curren
 ## Install (2 minutes)
 
 1. **Get BetterDiscord** (skip if you have it) — https://betterdiscord.app
-2. **Download** [`SteamInventoryValue.plugin.js`](https://github.com/VisaHolder/cs2-inventory-betterdiscord/releases/latest/download/SteamInventoryValue.plugin.js)
+2. **Download** [`CS2Inventory.plugin.js`](https://github.com/VisaHolder/cs2-inventory-betterdiscord/releases/latest/download/CS2Inventory.plugin.js)
 3. In Discord: **Settings → Plugins → Open Plugins Folder** — drop the file in
-4. Back in **Settings → Plugins**, turn **SteamInventoryValue** on
+4. Back in **Settings → Plugins**, turn **CS2Inventory** on
 
 Open anyone's profile (with a linked Steam) and their CS2 inventory value shows up.
 
@@ -64,7 +64,7 @@ Full guide: [`betterdiscord/README.md`](betterdiscord/README.md)
 ## Build
 
 ```bash
-cd betterdiscord && npm install && npm run build   # -> SteamInventoryValue.plugin.js
+cd betterdiscord && npm install && npm run build   # -> CS2Inventory.plugin.js
 ```
 
 The worker deploys via the **Deploy Worker** GitHub Action (`workflow_dispatch`), or `cd worker && npm i && wrangler deploy`.

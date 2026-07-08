@@ -1,5 +1,5 @@
 /*
- * SteamInventoryValue — BetterDiscord edition
+ * CS2Inventory — BetterDiscord edition
  * Copyright (c) 2026 VisaHolder
  * SPDX-License-Identifier: MIT
  *
@@ -11,7 +11,7 @@ import { FadeCalculator, AmberFadeCalculator, AcidFadeCalculator } from "csgo-fa
 import bluegemData from "./bluegem.json";
 
 const BD: any = (window as any).BdApi;
-const PLUGIN_NAME = "SteamInventoryValue";
+const PLUGIN_NAME = "CS2Inventory";
 const { Webpack } = BD;
 
 // ── Discord internals via BetterDiscord's webpack ───────────────────────────
@@ -1969,7 +1969,7 @@ function stopBackgroundRefresh() {
 // ── Self-updater ────────────────────────────────────────────────────────────────
 // Checks the built plugin committed on `main` for a newer @version, and (on confirm) writes it over
 // the local file — BetterDiscord's file watcher then reloads the plugin. No manual re-download.
-const UPDATE_URL = "https://raw.githubusercontent.com/VisaHolder/cs2-inventory-betterdiscord/main/betterdiscord/SteamInventoryValue.plugin.js";
+const UPDATE_URL = "https://raw.githubusercontent.com/VisaHolder/cs2-inventory-betterdiscord/main/betterdiscord/CS2Inventory.plugin.js";
 function compareVersions(a: string, b: string): number {
     const pa = a.split(".").map(n => parseInt(n, 10) || 0);
     const pb = b.split(".").map(n => parseInt(n, 10) || 0);
@@ -3027,8 +3027,27 @@ function unregisterCommands(): void {
 }
 
 // ─── BetterDiscord plugin entry ─────────────────────────────────────────────
-module.exports = class SteamInventoryValue {
+// One-time: the plugin was renamed SteamInventoryValue → CS2Inventory. Carry all stored data
+// (settings incl. the Steam token & trade URL, price snapshots, enabled users, flags) over from the
+// old config file so nobody loses anything on the rename. Runs once, guarded by a flag.
+function migrateFromOldName() {
+    const OLD = "SteamInventoryValue";
+    if (BD.Data.load(PLUGIN_NAME, "cs2.migratedFromSIV")) return;
+    try {
+        const folder = (BD as any).Plugins?.folder;
+        const oldCfg = folder ? `${folder}/${OLD}.config.json` : null;
+        const fs = require("fs");
+        if (oldCfg && fs.existsSync(oldCfg) && !BD.Data.load(PLUGIN_NAME, "settings")) {
+            const data = JSON.parse(fs.readFileSync(oldCfg, "utf8"));
+            for (const [k, v] of Object.entries(data)) BD.Data.save(PLUGIN_NAME, k, v);
+        }
+    } catch (e) { console.error("[VSI] migrate from old name", e); }
+    try { BD.Data.save(PLUGIN_NAME, "cs2.migratedFromSIV", true); } catch { /* */ }
+}
+
+module.exports = class CS2Inventory {
     start() {
+        try { migrateFromOldName(); } catch (e) { console.error("[VSI] migrate", e); }
         // One-time: wipe pre-stable-pricing history (fallback/sticker/pass-inclusive snapshots that
         // polluted deltas & sparklines). Runs once per install of this build.
         try {

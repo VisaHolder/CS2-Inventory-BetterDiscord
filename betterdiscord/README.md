@@ -1,4 +1,4 @@
-# SteamInventoryValue
+# CS2Inventory
 
 See anyone's CS2 inventory value right on their Discord profile — real Doppler phase pricing (Ruby / Sapphire / Black Pearl / Phase 1-4), live prices in your currency, and a Send Trade Offer / Steam button.
 
@@ -10,13 +10,13 @@ See anyone's CS2 inventory value right on their Discord profile — real Doppler
 Download and run the installer — https://betterdiscord.app
 
 **2. Download the plugin**
-Grab `SteamInventoryValue.plugin.js` from the [latest release](https://github.com/VisaHolder/cs2-inventory-betterdiscord/releases/latest).
+Grab `CS2Inventory.plugin.js` from the [latest release](https://github.com/VisaHolder/cs2-inventory-betterdiscord/releases/latest).
 
 **3. Drop it in your plugins folder**
 In Discord: **Settings** (bottom-left) → scroll to **Plugins** → click **Open Plugins Folder** → drag the file in.
 
 **4. Turn it on**
-Back in **Settings → Plugins**, turn **SteamInventoryValue** on.
+Back in **Settings → Plugins**, turn **CS2Inventory** on.
 
 Done. Open anyone's profile (with a linked Steam) and their CS2 inventory value shows up.
 
@@ -27,7 +27,7 @@ Done. Open anyone's profile (with a linked Steam) and their CS2 inventory value 
 Want a Ruby priced as a Ruby (not the generic Doppler price)?
 
 1. Get a free CSFloat API key: csfloat.com → **Profile → Developer → API key**
-2. In the Plugins list, click the gear next to **SteamInventoryValue** → paste it into **CSFloat API key**.
+2. In the Plugins list, click the gear next to **CS2Inventory** → paste it into **CSFloat API key**.
 
 That is the only setting that ever needs a key — everything else works out of the box.
 
@@ -55,5 +55,5 @@ That is the only setting that ever needs a key — everything else works out of 
 ```bash
 cd betterdiscord
 npm install
-npm run build      # -> SteamInventoryValue.plugin.js
+npm run build      # -> CS2Inventory.plugin.js
 ```

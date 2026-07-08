@@ -1,8 +1,8 @@
 /**
- * @name SteamInventoryValue
+ * @name CS2Inventory
  * @author VisaHolder
  * @description CS2 inventory value on Discord profile popouts — Doppler/Gamma phase pricing (CSFloat), FX-converted prices, and Trade Offer / Steam buttons.
- * @version 1.5.3
+ * @version 1.5.4
  * @source https://github.com/VisaHolder/cs2-inventory-betterdiscord
  * @website https://github.com/VisaHolder/cs2-inventory-betterdiscord
  */
@@ -306,7 +306,7 @@ var bluegem_default = { "Case Hardened": { "AK-47": { "0": 50, "1": 50, "2": 55,
 
 // src/plugin.tsx
 var BD = window.BdApi;
-var PLUGIN_NAME = "SteamInventoryValue";
+var PLUGIN_NAME = "CS2Inventory";
 var { Webpack } = BD;
 var UserStore;
 var UserProfileStore;
@@ -2076,7 +2076,7 @@ function stopBackgroundRefresh() {
     bgSeedTimer = null;
   }
 }
-var UPDATE_URL = "https://raw.githubusercontent.com/VisaHolder/cs2-inventory-betterdiscord/main/betterdiscord/SteamInventoryValue.plugin.js";
+var UPDATE_URL = "https://raw.githubusercontent.com/VisaHolder/cs2-inventory-betterdiscord/main/betterdiscord/CS2Inventory.plugin.js";
 function compareVersions(a, b) {
   const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
   const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
@@ -3078,8 +3078,32 @@ function unregisterCommands() {
   } catch {
   }
 }
-module.exports = class SteamInventoryValue {
+function migrateFromOldName() {
+  const OLD = "SteamInventoryValue";
+  if (BD.Data.load(PLUGIN_NAME, "cs2.migratedFromSIV")) return;
+  try {
+    const folder = BD.Plugins?.folder;
+    const oldCfg = folder ? `${folder}/${OLD}.config.json` : null;
+    const fs = require("fs");
+    if (oldCfg && fs.existsSync(oldCfg) && !BD.Data.load(PLUGIN_NAME, "settings")) {
+      const data = JSON.parse(fs.readFileSync(oldCfg, "utf8"));
+      for (const [k, v] of Object.entries(data)) BD.Data.save(PLUGIN_NAME, k, v);
+    }
+  } catch (e) {
+    console.error("[VSI] migrate from old name", e);
+  }
+  try {
+    BD.Data.save(PLUGIN_NAME, "cs2.migratedFromSIV", true);
+  } catch {
+  }
+}
+module.exports = class CS2Inventory {
   start() {
+    try {
+      migrateFromOldName();
+    } catch (e) {
+      console.error("[VSI] migrate", e);
+    }
     try {
       if (!BD.Data.load(PLUGIN_NAME, "vsi.histResetV1")) {
         clearAllHistory();
