@@ -284,11 +284,23 @@ const SETTINGS_SCHEMA: Record<string, any> = {
     },
     itemClickAction: {
         type: OptionType.SELECT,
-        description: "What clicking an item in the breakdown does. (Right-click always offers Inspect in-game.) Inspect / owner-inventory need the item's data, which fills in after the profile is (re)priced.",
+        description: "What LEFT-clicking an item in the breakdown does. Inspect / owner-inventory need the item's data, which fills in after the profile is (re)priced.",
         options: [
             { label: "Open its Steam Market listing", value: "market", default: true },
             { label: "Inspect in-game (opens CS2)", value: "inspect" },
+            { label: "Find on CSFloat", value: "csfloat" },
             { label: "View in the owner's Steam inventory", value: "inventory" },
+        ],
+    },
+    rightClickAction: {
+        type: OptionType.SELECT,
+        description: "What RIGHT-clicking an item does. \"Menu\" pops a little list so you can pick the action per item; the others fire that action directly.",
+        options: [
+            { label: "Show a menu (pick per item)", value: "menu", default: true },
+            { label: "Inspect in-game (opens CS2)", value: "inspect" },
+            { label: "Find on CSFloat", value: "csfloat" },
+            { label: "View in the owner's Steam inventory", value: "inventory" },
+            { label: "Open its Steam Market listing", value: "market" },
         ],
     },
     compactCard: {
@@ -1648,6 +1660,14 @@ const BUTTON_CSS = `
 /* Fade % and Blue Gem % chips (derived from the paint seed) */
 .vsi-modal-fade { font-size: 10px; font-weight: 800; flex: none; white-space: nowrap; padding: 2px 6px; border-radius: 4px; color: #ffb060; background: rgba(255,140,50,.15); }
 .vsi-modal-blue { font-size: 10px; font-weight: 800; flex: none; white-space: nowrap; padding: 2px 6px; border-radius: 4px; color: #6fb0ff; background: rgba(90,160,255,.17); }
+/* Row right-click action menu */
+.vsi-ctx {
+    position: fixed; z-index: 100002; min-width: 180px; padding: 5px;
+    background: #111318; border: 1px solid rgba(255,255,255,.08); border-radius: 8px;
+    box-shadow: 0 8px 28px rgba(0,0,0,.55); font-size: 13px; color: #dbdee1;
+}
+.vsi-ctx-item { padding: 7px 10px; border-radius: 5px; cursor: pointer; white-space: nowrap; }
+.vsi-ctx-item:hover { background: #5865f2; color: #fff; }
 /* Custom name tag */
 .vsi-modal-nametag { font-style: italic; color: #c8a2ff; font-weight: 500; }
 /* Type-filter chips */
@@ -2408,13 +2428,31 @@ const steamMarketUrl = (i: PricedItem) =>
     `https://steamcommunity.com/market/listings/730/${encodeURIComponent(i.hashName ?? stripToHashName(i.name))}`;
 // steam:// deep-link that opens CS2 and inspects the exact item (from asset property 6).
 const inspectUrl = (payload: string) => `steam://run/730//+csgo_econ_action_preview%20${payload}`;
-// Where a row click goes, per the itemClickAction setting; falls back to Market when the chosen
-// target's data (inspect payload / assetid) isn't available for this item.
+const csfloatSearchUrl = (i: PricedItem) =>
+    `https://csfloat.com/search?market_hash_name=${encodeURIComponent(i.hashName ?? stripToHashName(i.name))}`;
+const inventoryUrl = (assetid: string, ownerSteamId: string) =>
+    `https://steamcommunity.com/profiles/${ownerSteamId}/inventory/#730_2_${assetid}`;
+
+// Every action available for a row, in menu order. Kinds whose data is missing (no inspect
+// payload / no assetid) are omitted, so the menu only ever shows things that actually work.
+interface RowAction { kind: string; label: string; url: string; }
+function rowActions(i: PricedItem, ownerSteamId: string): RowAction[] {
+    const out: RowAction[] = [];
+    if (i.inspect) out.push({ kind: "inspect", label: "Inspect in-game", url: inspectUrl(i.inspect) });
+    out.push({ kind: "csfloat", label: "Find on CSFloat", url: csfloatSearchUrl(i) });
+    if (i.assetid && ownerSteamId) out.push({ kind: "inventory", label: "View in owner's inventory", url: inventoryUrl(i.assetid, ownerSteamId) });
+    out.push({ kind: "market", label: "Steam Market page", url: steamMarketUrl(i) });
+    return out;
+}
+// Resolve a configured action kind to its URL for this item, falling back to Market when the
+// chosen kind's data isn't available.
+const actionUrlFor = (kind: string, i: PricedItem, ownerSteamId: string): string => {
+    const acts = rowActions(i, ownerSteamId);
+    return (acts.find(a => a.kind === kind) ?? acts.find(a => a.kind === "market"))!.url;
+};
+// Where a LEFT-click goes, per the itemClickAction setting.
 function itemHref(i: PricedItem, ownerSteamId: string): string {
-    const action = (settings.store.itemClickAction as string) || "market";
-    if (action === "inspect" && i.inspect) return inspectUrl(i.inspect);
-    if (action === "inventory" && i.assetid && ownerSteamId) return `https://steamcommunity.com/profiles/${ownerSteamId}/inventory/#730_2_${i.assetid}`;
-    return steamMarketUrl(i);
+    return actionUrlFor((settings.store.itemClickAction as string) || "market", i, ownerSteamId);
 }
 // Open a steam:// (or http) URL via the OS handler. Discord's Electron swallows a plain anchor
 // click / window.open for custom protocols, so go through DiscordNative → Electron shell → anchor.
@@ -2426,9 +2464,46 @@ function openProtocol(url: string) {
 const clickActionLabel = (i: PricedItem): string => {
     const a = (settings.store.itemClickAction as string) || "market";
     if (a === "inspect" && i.inspect) return "Inspect in-game";
+    if (a === "csfloat") return "Find on CSFloat";
     if (a === "inventory" && i.assetid) return "View in owner's inventory";
     return "Open on the Steam Community Market";
 };
+
+// ── Row right-click menu ─────────────────────────────────────────────────────────
+// A tiny floating menu (our own HTML rows aren't React nodes, so BdApi.ContextMenu doesn't
+// fit) listing the available actions for one item. Dismisses on outside-click / Escape / scroll.
+let _ctxMenuEl: HTMLElement | null = null;
+function closeItemMenu() {
+    if (!_ctxMenuEl) return;
+    _ctxMenuEl.remove(); _ctxMenuEl = null;
+    document.removeEventListener("mousedown", _ctxOutside, true);
+    document.removeEventListener("keydown", _ctxKey, true);
+    window.removeEventListener("scroll", closeItemMenu, true);
+}
+function _ctxOutside(e: MouseEvent) { if (_ctxMenuEl && !_ctxMenuEl.contains(e.target as Node)) closeItemMenu(); }
+function _ctxKey(e: KeyboardEvent) { if (e.key === "Escape") { e.stopPropagation(); closeItemMenu(); } }
+function showItemMenu(x: number, y: number, actions: RowAction[]) {
+    closeItemMenu();
+    const m = document.createElement("div");
+    m.className = "vsi-ctx";
+    m.innerHTML = actions.map(a => `<div class="vsi-ctx-item" data-url="${escapeHtml(a.url)}">${escapeHtml(a.label)}</div>`).join("");
+    document.body.appendChild(m);
+    _ctxMenuEl = m;
+    const r = m.getBoundingClientRect();
+    m.style.left = `${Math.max(8, Math.min(x, window.innerWidth - r.width - 8))}px`;
+    m.style.top = `${Math.max(8, Math.min(y, window.innerHeight - r.height - 8))}px`;
+    m.addEventListener("click", ev => {
+        const el = (ev.target as HTMLElement).closest?.(".vsi-ctx-item") as HTMLElement | null;
+        if (el?.dataset.url) { openProtocol(el.dataset.url); closeItemMenu(); }
+    });
+    // Defer so the opening right-click's own event doesn't immediately dismiss it.
+    setTimeout(() => {
+        if (!_ctxMenuEl) return;
+        document.addEventListener("mousedown", _ctxOutside, true);
+        document.addEventListener("keydown", _ctxKey, true);
+        window.addEventListener("scroll", closeItemMenu, true);
+    }, 0);
+}
 const rarityAccent = (rarity?: string) =>
     rarity && /^[0-9a-f]{3}([0-9a-f]{3})?$/i.test(rarity) ? ` style="border-left-color:#${rarity}"` : "";
 // StatTrak / Souvenir tag from the raw market name.
@@ -2494,6 +2569,7 @@ const fadeBadge = (name: string, seed?: number): string => {
 
 let modalKeyHandler: ((e: KeyboardEvent) => void) | null = null;
 function closeInventoryModal() {
+    closeItemMenu();
     document.querySelector(".vsi-modal-backdrop")?.remove();
     if (modalKeyHandler) { document.removeEventListener("keydown", modalKeyHandler); modalKeyHandler = null; }
 }
@@ -2537,6 +2613,7 @@ async function openInventoryModal(steamId: string, displayName: string) {
     let note = "";
     let loading = true;
     let sortMode: "value" | "name" = "value";
+    let currentRows: PricedItem[] = []; // items currently rendered, indexed by row data-i (for right-click)
     let query = "";
     let typeFilter: string | null = null;
 
@@ -2573,7 +2650,8 @@ async function openInventoryModal(steamId: string, displayName: string) {
             ? (b.price * b.qty) - (a.price * a.qty)
             : abbrevItem(a.name).localeCompare(abbrevItem(b.name)));
         if (!filtered.length) { listEl.innerHTML = "<div class=\"vsi-modal-empty\">No items match your search.</div>"; return; }
-        const rows = filtered.map(i => {
+        currentRows = filtered;
+        const rows = filtered.map((i, idx) => {
             const sv = (i.stickerValue ?? 0) * i.qty;
             const badge = i.stickerCount
                 ? `<span class="vsi-modal-sticker${sv >= 50 ? " grail" : ""}" title="${i.stickerCount} sticker${i.stickerCount > 1 ? "s" : ""}">+${fmt(sv, cur)}</span>`
@@ -2592,7 +2670,7 @@ async function openInventoryModal(steamId: string, displayName: string) {
                 i.seed != null && isPatternSkin(i.name) ? `<span class="vsi-modal-seed" title="paint seed / pattern">#${i.seed}</span>` : "",
             ].filter(Boolean).join("");
             return `
-            <a class="vsi-modal-row" href="${itemHref(i, steamId)}" target="_blank" rel="noopener noreferrer" title="${clickActionLabel(i)}${i.inspect ? " · right-click to inspect in-game" : ""}"${i.inspect ? ` data-inspect="${escapeHtml(i.inspect)}"` : ""}${rarityAccent(i.rarity)}>
+            <a class="vsi-modal-row" href="${itemHref(i, steamId)}" target="_blank" rel="noopener noreferrer" data-i="${idx}" title="${clickActionLabel(i)} · right-click for more"${rarityAccent(i.rarity)}>
                 ${i.icon ? `<img class="vsi-modal-thumb" src="${steamThumb(i.icon)}" loading="lazy" />` : "<div class=\"vsi-modal-thumb\"></div>"}
                 <span class="vsi-modal-name">${escapeHtml(modalName(i.name))}${i.nametag ? ` <span class="vsi-modal-nametag" title="Custom name tag">“${escapeHtml(i.nametag)}”</span>` : ""}</span>
                 ${pills ? `<span class="vsi-modal-pills">${pills}</span>` : ""}
@@ -2605,13 +2683,18 @@ async function openInventoryModal(steamId: string, displayName: string) {
         listEl.innerHTML = (note ? `<div class="vsi-modal-empty">${escapeHtml(note)}</div>` : "") + rows;
     };
 
-    // Right-click a row → inspect that exact item in-game (if we have its inspect payload).
+    // Right-click a row → the configured rightClickAction. "menu" pops a picker; anything else
+    // fires that action straight away.
     listEl.addEventListener("contextmenu", e => {
         const row = (e.target as HTMLElement)?.closest?.(".vsi-modal-row") as HTMLElement | null;
-        const ins = row?.dataset?.inspect;
-        if (!ins) return;
+        const i = row ? currentRows[+(row.dataset.i ?? -1)] : null;
+        if (!i) return;
         e.preventDefault();
-        openProtocol(inspectUrl(ins));
+        const acts = rowActions(i, steamId);
+        const mode = (settings.store.rightClickAction as string) || "menu";
+        if (mode === "menu") { showItemMenu(e.clientX, e.clientY, acts); return; }
+        const chosen = acts.find(a => a.kind === mode) ?? acts.find(a => a.kind === "market");
+        if (chosen) openProtocol(chosen.url);
     });
     // Left-click when the action is "inspect" → the row href is steam://; Discord won't open that
     // from a normal anchor nav, so intercept and route it through openProtocol (http rows fall through).

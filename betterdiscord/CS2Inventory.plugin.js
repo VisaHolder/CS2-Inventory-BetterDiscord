@@ -2,7 +2,7 @@
  * @name CS2Inventory
  * @author VisaHolder
  * @description CS2 inventory value on Discord profile popouts — Doppler/Gamma phase pricing (CSFloat), FX-converted prices, and Trade Offer / Steam buttons.
- * @version 1.5.9
+ * @version 1.6.0
  * @source https://github.com/VisaHolder/cs2-inventory-betterdiscord
  * @website https://github.com/VisaHolder/cs2-inventory-betterdiscord
  */
@@ -574,11 +574,23 @@ var SETTINGS_SCHEMA = {
   },
   itemClickAction: {
     type: OptionType.SELECT,
-    description: "What clicking an item in the breakdown does. (Right-click always offers Inspect in-game.) Inspect / owner-inventory need the item's data, which fills in after the profile is (re)priced.",
+    description: "What LEFT-clicking an item in the breakdown does. Inspect / owner-inventory need the item's data, which fills in after the profile is (re)priced.",
     options: [
       { label: "Open its Steam Market listing", value: "market", default: true },
       { label: "Inspect in-game (opens CS2)", value: "inspect" },
+      { label: "Find on CSFloat", value: "csfloat" },
       { label: "View in the owner's Steam inventory", value: "inventory" }
+    ]
+  },
+  rightClickAction: {
+    type: OptionType.SELECT,
+    description: 'What RIGHT-clicking an item does. "Menu" pops a little list so you can pick the action per item; the others fire that action directly.',
+    options: [
+      { label: "Show a menu (pick per item)", value: "menu", default: true },
+      { label: "Inspect in-game (opens CS2)", value: "inspect" },
+      { label: "Find on CSFloat", value: "csfloat" },
+      { label: "View in the owner's Steam inventory", value: "inventory" },
+      { label: "Open its Steam Market listing", value: "market" }
     ]
   },
   compactCard: {
@@ -1791,6 +1803,14 @@ var BUTTON_CSS = `
 /* Fade % and Blue Gem % chips (derived from the paint seed) */
 .vsi-modal-fade { font-size: 10px; font-weight: 800; flex: none; white-space: nowrap; padding: 2px 6px; border-radius: 4px; color: #ffb060; background: rgba(255,140,50,.15); }
 .vsi-modal-blue { font-size: 10px; font-weight: 800; flex: none; white-space: nowrap; padding: 2px 6px; border-radius: 4px; color: #6fb0ff; background: rgba(90,160,255,.17); }
+/* Row right-click action menu */
+.vsi-ctx {
+    position: fixed; z-index: 100002; min-width: 180px; padding: 5px;
+    background: #111318; border: 1px solid rgba(255,255,255,.08); border-radius: 8px;
+    box-shadow: 0 8px 28px rgba(0,0,0,.55); font-size: 13px; color: #dbdee1;
+}
+.vsi-ctx-item { padding: 7px 10px; border-radius: 5px; cursor: pointer; white-space: nowrap; }
+.vsi-ctx-item:hover { background: #5865f2; color: #fff; }
 /* Custom name tag */
 .vsi-modal-nametag { font-style: italic; color: #c8a2ff; font-weight: 500; }
 /* Type-filter chips */
@@ -2435,11 +2455,22 @@ var steamThumb = (icon) => `https://community.akamai.steamstatic.com/economy/ima
 var stripToHashName = (name) => name.replace(/\s*×\d+\s*$/, "").replace(/\s*\((?:Phase [1-4]|Ruby|Sapphire|Black Pearl|Emerald)\)\s*$/i, "");
 var steamMarketUrl = (i) => `https://steamcommunity.com/market/listings/730/${encodeURIComponent(i.hashName ?? stripToHashName(i.name))}`;
 var inspectUrl = (payload) => `steam://run/730//+csgo_econ_action_preview%20${payload}`;
+var csfloatSearchUrl = (i) => `https://csfloat.com/search?market_hash_name=${encodeURIComponent(i.hashName ?? stripToHashName(i.name))}`;
+var inventoryUrl = (assetid, ownerSteamId) => `https://steamcommunity.com/profiles/${ownerSteamId}/inventory/#730_2_${assetid}`;
+function rowActions(i, ownerSteamId) {
+  const out = [];
+  if (i.inspect) out.push({ kind: "inspect", label: "Inspect in-game", url: inspectUrl(i.inspect) });
+  out.push({ kind: "csfloat", label: "Find on CSFloat", url: csfloatSearchUrl(i) });
+  if (i.assetid && ownerSteamId) out.push({ kind: "inventory", label: "View in owner's inventory", url: inventoryUrl(i.assetid, ownerSteamId) });
+  out.push({ kind: "market", label: "Steam Market page", url: steamMarketUrl(i) });
+  return out;
+}
+var actionUrlFor = (kind, i, ownerSteamId) => {
+  const acts = rowActions(i, ownerSteamId);
+  return (acts.find((a) => a.kind === kind) ?? acts.find((a) => a.kind === "market")).url;
+};
 function itemHref(i, ownerSteamId) {
-  const action = settings.store.itemClickAction || "market";
-  if (action === "inspect" && i.inspect) return inspectUrl(i.inspect);
-  if (action === "inventory" && i.assetid && ownerSteamId) return `https://steamcommunity.com/profiles/${ownerSteamId}/inventory/#730_2_${i.assetid}`;
-  return steamMarketUrl(i);
+  return actionUrlFor(settings.store.itemClickAction || "market", i, ownerSteamId);
 }
 function openProtocol(url) {
   try {
@@ -2471,9 +2502,52 @@ function openProtocol(url) {
 var clickActionLabel = (i) => {
   const a = settings.store.itemClickAction || "market";
   if (a === "inspect" && i.inspect) return "Inspect in-game";
+  if (a === "csfloat") return "Find on CSFloat";
   if (a === "inventory" && i.assetid) return "View in owner's inventory";
   return "Open on the Steam Community Market";
 };
+var _ctxMenuEl = null;
+function closeItemMenu() {
+  if (!_ctxMenuEl) return;
+  _ctxMenuEl.remove();
+  _ctxMenuEl = null;
+  document.removeEventListener("mousedown", _ctxOutside, true);
+  document.removeEventListener("keydown", _ctxKey, true);
+  window.removeEventListener("scroll", closeItemMenu, true);
+}
+function _ctxOutside(e) {
+  if (_ctxMenuEl && !_ctxMenuEl.contains(e.target)) closeItemMenu();
+}
+function _ctxKey(e) {
+  if (e.key === "Escape") {
+    e.stopPropagation();
+    closeItemMenu();
+  }
+}
+function showItemMenu(x, y, actions) {
+  closeItemMenu();
+  const m = document.createElement("div");
+  m.className = "vsi-ctx";
+  m.innerHTML = actions.map((a) => `<div class="vsi-ctx-item" data-url="${escapeHtml(a.url)}">${escapeHtml(a.label)}</div>`).join("");
+  document.body.appendChild(m);
+  _ctxMenuEl = m;
+  const r = m.getBoundingClientRect();
+  m.style.left = `${Math.max(8, Math.min(x, window.innerWidth - r.width - 8))}px`;
+  m.style.top = `${Math.max(8, Math.min(y, window.innerHeight - r.height - 8))}px`;
+  m.addEventListener("click", (ev) => {
+    const el = ev.target.closest?.(".vsi-ctx-item");
+    if (el?.dataset.url) {
+      openProtocol(el.dataset.url);
+      closeItemMenu();
+    }
+  });
+  setTimeout(() => {
+    if (!_ctxMenuEl) return;
+    document.addEventListener("mousedown", _ctxOutside, true);
+    document.addEventListener("keydown", _ctxKey, true);
+    window.addEventListener("scroll", closeItemMenu, true);
+  }, 0);
+}
 var rarityAccent = (rarity) => rarity && /^[0-9a-f]{3}([0-9a-f]{3})?$/i.test(rarity) ? ` style="border-left-color:#${rarity}"` : "";
 var stTag = (name) => /StatTrak™/.test(name) ? '<span class="vsi-modal-tag st">ST</span>' : /^Souvenir /.test(name) ? '<span class="vsi-modal-tag sv">SV</span>' : "";
 var modalName = (name) => name.replace(/StatTrak™\s*/g, "").replace(/Souvenir\s+/g, "").replace(/\s*\((?:Factory New|Minimal Wear|Field-Tested|Well-Worn|Battle-Scarred)\)\s*$/i, "").replace(/★\s*/g, "\u2605 ").trim();
@@ -2528,6 +2602,7 @@ var fadeBadge = (name, seed) => {
 };
 var modalKeyHandler = null;
 function closeInventoryModal() {
+  closeItemMenu();
   document.querySelector(".vsi-modal-backdrop")?.remove();
   if (modalKeyHandler) {
     document.removeEventListener("keydown", modalKeyHandler);
@@ -2574,6 +2649,7 @@ async function openInventoryModal(steamId, displayName) {
   let note = "";
   let loading = true;
   let sortMode = "value";
+  let currentRows = [];
   let query = "";
   let typeFilter = null;
   const TYPE_ORDER = ["Knives", "Gloves", "Rifles", "Snipers", "Pistols", "SMGs", "Heavy", "Agents", "Stickers", "Charms", "Graffiti", "Music Kits", "Cases", "Pins", "Other"];
@@ -2617,7 +2693,8 @@ async function openInventoryModal(steamId, displayName) {
       listEl.innerHTML = '<div class="vsi-modal-empty">No items match your search.</div>';
       return;
     }
-    const rows = filtered.map((i) => {
+    currentRows = filtered;
+    const rows = filtered.map((i, idx) => {
       const sv = (i.stickerValue ?? 0) * i.qty;
       const badge = i.stickerCount ? `<span class="vsi-modal-sticker${sv >= 50 ? " grail" : ""}" title="${i.stickerCount} sticker${i.stickerCount > 1 ? "s" : ""}">+${fmt(sv, cur)}</span>` : "";
       const pills = [
@@ -2632,7 +2709,7 @@ async function openInventoryModal(steamId, displayName) {
         i.seed != null && isPatternSkin(i.name) ? `<span class="vsi-modal-seed" title="paint seed / pattern">#${i.seed}</span>` : ""
       ].filter(Boolean).join("");
       return `
-            <a class="vsi-modal-row" href="${itemHref(i, steamId)}" target="_blank" rel="noopener noreferrer" title="${clickActionLabel(i)}${i.inspect ? " \xB7 right-click to inspect in-game" : ""}"${i.inspect ? ` data-inspect="${escapeHtml(i.inspect)}"` : ""}${rarityAccent(i.rarity)}>
+            <a class="vsi-modal-row" href="${itemHref(i, steamId)}" target="_blank" rel="noopener noreferrer" data-i="${idx}" title="${clickActionLabel(i)} \xB7 right-click for more"${rarityAccent(i.rarity)}>
                 ${i.icon ? `<img class="vsi-modal-thumb" src="${steamThumb(i.icon)}" loading="lazy" />` : '<div class="vsi-modal-thumb"></div>'}
                 <span class="vsi-modal-name">${escapeHtml(modalName(i.name))}${i.nametag ? ` <span class="vsi-modal-nametag" title="Custom name tag">\u201C${escapeHtml(i.nametag)}\u201D</span>` : ""}</span>
                 ${pills ? `<span class="vsi-modal-pills">${pills}</span>` : ""}
@@ -2646,10 +2723,17 @@ async function openInventoryModal(steamId, displayName) {
   };
   listEl.addEventListener("contextmenu", (e) => {
     const row = e.target?.closest?.(".vsi-modal-row");
-    const ins = row?.dataset?.inspect;
-    if (!ins) return;
+    const i = row ? currentRows[+(row.dataset.i ?? -1)] : null;
+    if (!i) return;
     e.preventDefault();
-    openProtocol(inspectUrl(ins));
+    const acts = rowActions(i, steamId);
+    const mode = settings.store.rightClickAction || "menu";
+    if (mode === "menu") {
+      showItemMenu(e.clientX, e.clientY, acts);
+      return;
+    }
+    const chosen = acts.find((a) => a.kind === mode) ?? acts.find((a) => a.kind === "market");
+    if (chosen) openProtocol(chosen.url);
   });
   listEl.addEventListener("click", (e) => {
     const row = e.target?.closest?.("a.vsi-modal-row");
