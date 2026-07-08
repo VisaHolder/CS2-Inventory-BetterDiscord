@@ -2,7 +2,7 @@
  * @name CS2Inventory
  * @author VisaHolder
  * @description CS2 inventory value on Discord profile popouts — Doppler/Gamma phase pricing (CSFloat), FX-converted prices, and Trade Offer / Steam buttons.
- * @version 1.6.9
+ * @version 1.7.0
  * @source https://github.com/VisaHolder/cs2-inventory-betterdiscord
  * @website https://github.com/VisaHolder/cs2-inventory-betterdiscord
  */
@@ -1799,7 +1799,7 @@ var BUTTON_CSS = `
     font-size: 20px; line-height: 1; padding: 2px 6px; border-radius: 6px;
 }
 .vsi-modal-x:hover { background: rgba(255,255,255,.08); color: #fff; }
-.vsi-modal-tools { display: flex; gap: 8px; padding: 10px 16px; border-bottom: 1px solid rgba(255,255,255,.06); }
+.vsi-modal-tools { display: flex; gap: 8px; padding: 10px 16px 6px; }
 .vsi-modal-search {
     flex: 1; min-width: 0; padding: 7px 10px; border-radius: 7px;
     background: #111214; color: #dbdee1; border: 1px solid rgba(255,255,255,.08); font-size: 13px;
