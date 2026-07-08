@@ -37,7 +37,8 @@ That is the only setting that ever needs a key — everything else works out of 
 
 - Full inventory value in your currency (CSFloat prices + live FX), with rarity-colored top items
 - Doppler / Gamma Doppler phase pricing (with the optional key) — Ruby, Sapphire, Black Pearl, Emerald, Phase 1-4
-- Click any card (or right-click a user) for a searchable, sortable breakdown of every item — thumbnails, rarity colors, StatTrak™ / Souvenir tags, and one click through to each item's Steam Market page
+- Real float + paint seed on every skin, for any public inventory (straight from Steam — no login or key)
+- Click any card (or right-click a user) for a searchable, sortable, type-filterable breakdown of every item — thumbnails, float + seed, wear tags (FN→BS), rarity colors, StatTrak™ / Souvenir tags, custom name tags, and one click through to each item's Steam Market page
 - Price history sparkline with all-time-high / low markers, a gain/loss delta chip, and a value-milestone badge ($1K / $5K / $10K …)
 - "What changed" line showing items gained / dropped since last time
 - Send Trade Offer + Steam Profile buttons on profiles

@@ -4,7 +4,7 @@
 
 **A BetterDiscord plugin that shows anyone's CS2 inventory value right on their Discord profile.**
 
-Real Doppler phase pricing · live prices in your currency · Trade Offer & Steam buttons · a shared cache so it loads instantly for everyone.
+Real floats & paint seeds · Doppler phase pricing · live prices in your currency · Trade Offer & Steam buttons · a shared cache so it loads instantly for everyone.
 
 [![Download](https://img.shields.io/badge/download-1a1a1a?style=for-the-badge&labelColor=2ea043)](https://github.com/VisaHolder/steam-inventory-value/releases/latest/download/SteamInventoryValue.plugin.js) &nbsp; [![Release](https://img.shields.io/github/v/release/VisaHolder/steam-inventory-value?style=for-the-badge&labelColor=2d333b&color=5865f2)](https://github.com/VisaHolder/steam-inventory-value/releases/latest) &nbsp; [![License](https://img.shields.io/badge/license-MIT-1a1a1a?style=for-the-badge&labelColor=2d333b)](LICENSE)
 
@@ -38,7 +38,8 @@ Full guide: [`betterdiscord/README.md`](betterdiscord/README.md)
 
 - **Inventory value** on every profile — total in your currency (CSFloat prices + live FX), top items with rarity-colored tiers, item count
 - **Doppler / Gamma Doppler phase pricing** — Ruby, Sapphire, Black Pearl, Emerald, Phase 1-4 (with the optional CSFloat key)
-- **Full breakdown** — click any card for a searchable, sortable list of every item with thumbnails, rarity colors, StatTrak™ / Souvenir tags, and one click through to each item's Steam Market page; right-click a user for the same
+- **Real floats + paint seeds** — every skin's exact wear value and pattern index, on *any* public inventory, pulled straight from Steam (no login, no key)
+- **Full breakdown** — click any card for a searchable, sortable, type-filterable list of every item: thumbnails, real float + seed, color-graded wear (FN→BS), rarity colors, StatTrak™ / Souvenir tags, custom name tags, and one click through to each item's Steam Market page; right-click a user for the same
 - **Price history at a glance** — a sparkline with all-time-high / low markers, a gain/loss delta chip, and a value-milestone badge ($1K / $5K / $10K …)
 - **What changed** — each card shows items gained/dropped since last time
 - **Trade Offer + Steam Profile buttons**, auto-detected from a linked Steam or a shared/bio trade URL
