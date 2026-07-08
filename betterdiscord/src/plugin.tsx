@@ -1031,9 +1031,14 @@ function humanAgo(ms: number): string {
 
 function computeDelta(currentTotal: number, snaps: Snapshot[], minAgeMs: number): { delta: number; ago: string } | null {
     const now = Date.now();
-    // First snapshot in `snaps` is the just-pushed current run; skip it and find something older than minAge.
-    const prev = snaps.find(s => now - s.ts >= minAgeMs && s.total !== currentTotal);
-    if (!prev) return null;
+    // `snaps` is newest→oldest and excludes the current run. Compare against a past snapshot with a
+    // different total. Prefer the most recent one at least `minAge` old (the chosen window); but if
+    // no snapshot is that old yet — history depth varies per profile since there's no background
+    // pricing — fall back to the OLDEST one we have, so the chip always reflects a real change
+    // instead of blinking out. The label always shows that snapshot's true age.
+    const differing = snaps.filter(s => s.total !== currentTotal);
+    if (!differing.length) return null;
+    const prev = differing.find(s => now - s.ts >= minAgeMs) ?? differing[differing.length - 1];
     return { delta: currentTotal - prev.total, ago: humanAgo(now - prev.ts) };
 }
 
