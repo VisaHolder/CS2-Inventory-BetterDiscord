@@ -285,7 +285,7 @@ const SETTINGS_SCHEMA: Record<string, any> = {
     },
     backgroundRefresh: {
         type: OptionType.BOOLEAN,
-        description: "Keep recently-viewed profiles freshly priced on a timer (a few every ~6h), so the gain/loss chip has a real data point at your chosen window — a true 24h change, consistent on every card. Light: a handful of price fetches spaced out, no constant CPU use. Turn off to only price profiles when you open them.",
+        description: "Keep recently-viewed profiles freshly priced on a timer, so the gain/loss chip has a real data point at your chosen window — a true, consistent change on every card. The cadence follows your gain/loss window automatically (a 1h window re-prices hourly; longer windows cap at every ~6h). Light: a handful of price fetches spaced out, no constant CPU use. Turn off to only price profiles when you open them.",
         default: true,
     },
     resetHistory: {
@@ -1774,10 +1774,17 @@ function maybeAutoRefresh(card: HTMLElement, latest: Snapshot, shownUserId: stri
 let bgTimer: ReturnType<typeof setInterval> | null = null;
 let bgSeedTimer: ReturnType<typeof setTimeout> | null = null;
 let bgRunning = false;
-const BG_CHECK_INTERVAL = 30 * 60_000;      // how often to look for stale profiles
-const BG_STALE_MS = 6 * 3_600_000;          // re-price a profile once its latest snapshot is older than this
+const BG_CHECK_INTERVAL = 15 * 60_000;      // how often to look for stale profiles
 const BG_RELEVANT_MS = 7 * 24 * 3_600_000;  // stop re-pricing profiles not viewed in this long
 const BG_MAX_PER_TICK = 5;                  // cap price fetches per check so it never bursts
+
+// How stale a profile must be before we re-price it — tied to the delta window so the cadence
+// always supports it: a 1h window prices hourly, longer windows cap at every 6h (dense enough for
+// a 24h/7d point without over-pricing). No separate setting to keep in sync.
+function bgStaleMs(): number {
+    const windowMin = settings.store.deltaMinAgeMinutes || 1440;
+    return Math.min(windowMin * 60_000, 6 * 3_600_000);
+}
 
 // SteamIDs we hold snapshots for (i.e. profiles that have been priced at least once).
 function trackedSteamIds(): string[] {
@@ -1796,9 +1803,10 @@ async function backgroundTick() {
     bgRunning = true;
     try {
         const now = Date.now();
+        const staleMs = bgStaleMs();
         const stale = trackedSteamIds()
             .map(steamId => ({ steamId, age: now - (getSnapshotsSync(steamId)[0]?.ts ?? 0) }))
-            .filter(x => x.age > BG_STALE_MS && x.age < BG_RELEVANT_MS)
+            .filter(x => x.age > staleMs && x.age < BG_RELEVANT_MS)
             .sort((a, b) => b.age - a.age)     // most stale first
             .slice(0, BG_MAX_PER_TICK);
         for (const { steamId } of stale) {

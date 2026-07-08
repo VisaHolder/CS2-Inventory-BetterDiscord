@@ -282,7 +282,7 @@ var SETTINGS_SCHEMA = {
   },
   backgroundRefresh: {
     type: OptionType.BOOLEAN,
-    description: "Keep recently-viewed profiles freshly priced on a timer (a few every ~6h), so the gain/loss chip has a real data point at your chosen window \u2014 a true 24h change, consistent on every card. Light: a handful of price fetches spaced out, no constant CPU use. Turn off to only price profiles when you open them.",
+    description: "Keep recently-viewed profiles freshly priced on a timer, so the gain/loss chip has a real data point at your chosen window \u2014 a true, consistent change on every card. The cadence follows your gain/loss window automatically (a 1h window re-prices hourly; longer windows cap at every ~6h). Light: a handful of price fetches spaced out, no constant CPU use. Turn off to only price profiles when you open them.",
     default: true
   },
   resetHistory: {
@@ -1577,10 +1577,13 @@ function maybeAutoRefresh(card, latest, shownUserId, isOwn) {
 var bgTimer = null;
 var bgSeedTimer = null;
 var bgRunning = false;
-var BG_CHECK_INTERVAL = 30 * 6e4;
-var BG_STALE_MS = 6 * 36e5;
+var BG_CHECK_INTERVAL = 15 * 6e4;
 var BG_RELEVANT_MS = 7 * 24 * 36e5;
 var BG_MAX_PER_TICK = 5;
+function bgStaleMs() {
+  const windowMin = settings.store.deltaMinAgeMinutes || 1440;
+  return Math.min(windowMin * 6e4, 6 * 36e5);
+}
 function trackedSteamIds() {
   try {
     const fs = require("fs");
@@ -1598,7 +1601,8 @@ async function backgroundTick() {
   bgRunning = true;
   try {
     const now = Date.now();
-    const stale = trackedSteamIds().map((steamId) => ({ steamId, age: now - (getSnapshotsSync(steamId)[0]?.ts ?? 0) })).filter((x) => x.age > BG_STALE_MS && x.age < BG_RELEVANT_MS).sort((a, b) => b.age - a.age).slice(0, BG_MAX_PER_TICK);
+    const staleMs = bgStaleMs();
+    const stale = trackedSteamIds().map((steamId) => ({ steamId, age: now - (getSnapshotsSync(steamId)[0]?.ts ?? 0) })).filter((x) => x.age > staleMs && x.age < BG_RELEVANT_MS).sort((a, b) => b.age - a.age).slice(0, BG_MAX_PER_TICK);
     for (const { steamId } of stale) {
       try {
         await priceSteamId(steamId, void 0, void 0, true);
