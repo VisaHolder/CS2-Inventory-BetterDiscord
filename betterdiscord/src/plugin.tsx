@@ -2493,18 +2493,22 @@ const buildChatLine = (i: PricedItem, cur: number): string => {
     parts.push(fmt(i.price, cur));
     return parts.join(" · ");
 };
-// Drop text into the message box (user reviews & sends). Primary: focus the Slate editor and
-// execCommand("insertText") — the input events Slate listens for. Then the ComponentDispatch
-// INSERT_TEXT path, then clipboard as a last resort. Returns "insert" | "copy" | "".
-function postToChat(text: string): "insert" | "copy" | "" {
+// Post text to the current channel. Primary: send it straight through Discord's message API (the
+// same path /inventory uses to post publicly) — reliable, unlike execCommand insertText which the
+// Slate editor doesn't register in its model (so the draft won't actually send). Falls back to
+// inserting into the box, then the clipboard. Returns "sent" | "insert" | "copy" | "".
+function postToChat(text: string): "sent" | "insert" | "copy" | "" {
     try {
-        const box = document.querySelector('[data-slate-editor="true"]') as HTMLElement | null;
-        if (box) {
-            box.focus();
-            if (document.execCommand("insertText", false, text)) return "insert";
+        const channelId = SelectedChannelStore?.getChannelId?.();
+        if (channelId && MessageActions?.sendMessage) {
+            MessageActions.sendMessage(channelId, { content: text, tts: false, invalidEmojis: [], validNonShortcutEmojis: [] }, undefined, { nonce: String(Date.now()) });
+            return "sent";
         }
     } catch { /* */ }
-    try { if (ComponentDispatch?.dispatchToLastSubscribed) { ComponentDispatch.dispatchToLastSubscribed("INSERT_TEXT", { plainText: text, rawText: text }); return "insert"; } } catch { /* */ }
+    try {
+        const box = document.querySelector('[data-slate-editor="true"]') as HTMLElement | null;
+        if (box) { box.focus(); if (document.execCommand("insertText", false, text)) return "insert"; }
+    } catch { /* */ }
     return copyText(text) ? "copy" : "";
 }
 
@@ -2588,11 +2592,10 @@ function showItemMenu(x: number, y: number, actions: RowAction[]) {
         const el = (ev.target as HTMLElement).closest?.(".vsi-ctx-item") as HTMLElement | null;
         if (!el) return;
         if (el.dataset.chat != null) {
-            // Close the whole modal first so the message box is the active editor, then insert.
-            const text = el.dataset.chat;
-            closeInventoryModal();
-            const r2 = postToChat(text);
-            try { if (r2) BD.UI?.showToast?.(r2 === "insert" ? "Added to your message box" : "Copied — paste into chat", { type: "success" }); } catch { /* */ }
+            const r2 = postToChat(el.dataset.chat);
+            const msg = r2 === "sent" ? "Posted to chat" : r2 === "insert" ? "Added to your message box" : r2 === "copy" ? "Copied — paste into chat" : "Couldn't post to chat";
+            try { BD.UI?.showToast?.(msg, { type: r2 ? "success" : "error" }); } catch { /* */ }
+            closeItemMenu();
             return;
         }
         if (el.dataset.copy != null) { if (copyText(el.dataset.copy)) try { BD.UI?.showToast?.("Copied inspect link", { type: "success" }); } catch { /* */ } }

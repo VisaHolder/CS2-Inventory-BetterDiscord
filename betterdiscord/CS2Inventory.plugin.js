@@ -2,7 +2,7 @@
  * @name CS2Inventory
  * @author VisaHolder
  * @description CS2 inventory value on Discord profile popouts — Doppler/Gamma phase pricing (CSFloat), FX-converted prices, and Trade Offer / Steam buttons.
- * @version 1.6.4
+ * @version 1.6.5
  * @source https://github.com/VisaHolder/cs2-inventory-betterdiscord
  * @website https://github.com/VisaHolder/cs2-inventory-betterdiscord
  */
@@ -2511,17 +2511,18 @@ var buildChatLine = (i, cur) => {
 };
 function postToChat(text) {
   try {
-    const box = document.querySelector('[data-slate-editor="true"]');
-    if (box) {
-      box.focus();
-      if (document.execCommand("insertText", false, text)) return "insert";
+    const channelId = SelectedChannelStore?.getChannelId?.();
+    if (channelId && MessageActions?.sendMessage) {
+      MessageActions.sendMessage(channelId, { content: text, tts: false, invalidEmojis: [], validNonShortcutEmojis: [] }, void 0, { nonce: String(Date.now()) });
+      return "sent";
     }
   } catch {
   }
   try {
-    if (ComponentDispatch?.dispatchToLastSubscribed) {
-      ComponentDispatch.dispatchToLastSubscribed("INSERT_TEXT", { plainText: text, rawText: text });
-      return "insert";
+    const box = document.querySelector('[data-slate-editor="true"]');
+    if (box) {
+      box.focus();
+      if (document.execCommand("insertText", false, text)) return "insert";
     }
   } catch {
   }
@@ -2620,13 +2621,13 @@ function showItemMenu(x, y, actions) {
     const el = ev.target.closest?.(".vsi-ctx-item");
     if (!el) return;
     if (el.dataset.chat != null) {
-      const text = el.dataset.chat;
-      closeInventoryModal();
-      const r2 = postToChat(text);
+      const r2 = postToChat(el.dataset.chat);
+      const msg = r2 === "sent" ? "Posted to chat" : r2 === "insert" ? "Added to your message box" : r2 === "copy" ? "Copied \u2014 paste into chat" : "Couldn't post to chat";
       try {
-        if (r2) BD.UI?.showToast?.(r2 === "insert" ? "Added to your message box" : "Copied \u2014 paste into chat", { type: "success" });
+        BD.UI?.showToast?.(msg, { type: r2 ? "success" : "error" });
       } catch {
       }
+      closeItemMenu();
       return;
     }
     if (el.dataset.copy != null) {
