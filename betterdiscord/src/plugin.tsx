@@ -1599,6 +1599,31 @@ const BUTTON_CSS = `
 .vsi-modal-sticker.grail { color: #e6b800; background: rgba(230,184,0,.14); }
 .vsi-modal-price { font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 600; color: #f2f3f5; flex: none; }
 .vsi-modal-empty { padding: 28px 16px; text-align: center; color: #949ba4; font-size: 13px; }
+
+/* ── "Made by reap" about block in settings ── */
+.vsi-about {
+    margin: 0 0 18px; padding: 14px 16px; border-radius: 10px;
+    background: linear-gradient(135deg, rgba(88,101,242,.14), rgba(35,165,90,.08));
+    border: 1px solid rgba(255,255,255,.08);
+    font-family: var(--font-primary, "gg sans"), sans-serif;
+}
+.vsi-about-head { display: flex; align-items: center; gap: 11px; margin-bottom: 11px; }
+.vsi-about-logo { font-size: 22px; line-height: 1; }
+.vsi-about-title { font-size: 15px; font-weight: 800; color: var(--header-primary, #f2f3f5); letter-spacing: -.01em; }
+.vsi-about-by { font-size: 12px; color: var(--text-muted, #b5bac1); }
+.vsi-about-by b { color: #c8a2ff; }
+.vsi-about-links { display: flex; flex-wrap: wrap; gap: 8px; }
+.vsi-about-link {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 12.5px; font-weight: 600; text-decoration: none !important; cursor: pointer;
+    padding: 6px 11px; border-radius: 7px;
+    background: rgba(0,0,0,.22); color: #dbdee1; border: 1px solid rgba(255,255,255,.06);
+    transition: background .12s ease, border-color .12s ease, transform .1s ease;
+}
+.vsi-about-link:hover { background: rgba(0,0,0,.35); border-color: rgba(255,255,255,.16); color: #fff; }
+.vsi-about-link:active { transform: translateY(1px); }
+.vsi-about-donate { background: rgba(230,184,0,.14); border-color: rgba(230,184,0,.25); color: #ffdf7e; }
+.vsi-about-donate:hover { background: rgba(230,184,0,.22); border-color: rgba(230,184,0,.4); color: #ffe9a8; }
 `;
 
 let styleEl: HTMLStyleElement | null = null;
@@ -2588,6 +2613,33 @@ function prettyName(id: string): string {
     return id.replace(/([A-Z])/g, " $1").replace(/^./, c => c.toUpperCase()).trim();
 }
 
+// "Made by reap" credit block pinned above the settings.
+const DONATE_URL = "https://steamcommunity.com/tradeoffer/new/?partner=1149562692&token=smsukaox";
+const GITHUB_URL = "https://github.com/VisaHolder/steam-inventory-value";
+const DISCORD_HANDLE = "reap";
+function buildAboutSection(): HTMLElement {
+    const el = document.createElement("div");
+    el.className = "vsi-about";
+    el.innerHTML = `
+        <div class="vsi-about-head">
+            <span class="vsi-about-logo">💼</span>
+            <div class="vsi-about-titles">
+                <div class="vsi-about-title">CS2 Inventory Value</div>
+                <div class="vsi-about-by">made by <b>reap</b></div>
+            </div>
+        </div>
+        <div class="vsi-about-links">
+            <a class="vsi-about-link" href="${GITHUB_URL}" target="_blank" rel="noopener noreferrer">🐙 GitHub</a>
+            <span class="vsi-about-link vsi-about-copy" title="Click to copy">💬 ${escapeHtml(DISCORD_HANDLE)}</span>
+            <a class="vsi-about-link vsi-about-donate" href="${DONATE_URL}" target="_blank" rel="noopener noreferrer" title="Send a skin — thank you 💛">💛 Donate a skin</a>
+        </div>
+    `;
+    el.querySelector(".vsi-about-copy")?.addEventListener("click", () => {
+        try { navigator.clipboard.writeText(DISCORD_HANDLE); BD.UI?.showToast?.("Discord copied", { type: "success" }); } catch { /* */ }
+    });
+    return el;
+}
+
 function buildSettingsPanel(): any {
     const items = Object.entries(SETTINGS_SCHEMA).map(([id, def]: [string, any]) => {
         const base: any = { id, name: prettyName(id), note: def.description, value: (settings.store as any)[id] };
@@ -2960,6 +3012,13 @@ module.exports = class SteamInventoryValue {
     }
 
     getSettingsPanel() {
-        return buildSettingsPanel();
+        const wrap = document.createElement("div");
+        try { wrap.appendChild(buildAboutSection()); } catch (e) { console.error("[VSI] about", e); }
+        try {
+            const panel = buildSettingsPanel();
+            if (panel instanceof Node) wrap.appendChild(panel);
+            else if (panel) { const mount = document.createElement("div"); wrap.appendChild(mount); BD.ReactDOM?.render(panel, mount); }
+        } catch (e) { console.error("[VSI] settings panel", e); }
+        return wrap;
     }
 };
