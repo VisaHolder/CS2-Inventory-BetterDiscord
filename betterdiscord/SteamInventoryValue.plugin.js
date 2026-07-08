@@ -2067,6 +2067,18 @@ async function openInventoryModal(steamId, displayName) {
     total = local.total;
     loading = false;
     render();
+    const hasFloat = local.items.some((i) => i.float != null);
+    const hasSkin = local.items.some((i) => /\((?:Factory New|Minimal Wear|Field-Tested|Well-Worn|Battle-Scarred)\)/.test(i.name));
+    if (!hasFloat && hasSkin) {
+      priceSteamId(steamId).then((inv) => {
+        if (backdrop.isConnected) {
+          items = inv.allItems;
+          total = inv.total;
+          render();
+        }
+      }).catch(() => {
+      });
+    }
     return;
   }
   try {

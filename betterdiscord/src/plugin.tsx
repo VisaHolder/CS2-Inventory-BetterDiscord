@@ -2335,6 +2335,13 @@ async function openInventoryModal(steamId: string, displayName: string) {
     if (!backdrop.isConnected) return;
     if (local?.items?.length) {
         items = local.items; total = local.total; loading = false; render();
+        // Cached before floats/nametags/types existed? If it has skins but no per-item float, re-price
+        // in the background and re-render with the richer data — self-heals so the next open is instant.
+        const hasFloat = local.items.some(i => i.float != null);
+        const hasSkin = local.items.some(i => /\((?:Factory New|Minimal Wear|Field-Tested|Well-Worn|Battle-Scarred)\)/.test(i.name));
+        if (!hasFloat && hasSkin) {
+            priceSteamId(steamId).then(inv => { if (backdrop.isConnected) { items = inv.allItems; total = inv.total; render(); } }).catch(() => { /* */ });
+        }
         return;
     }
     try {
