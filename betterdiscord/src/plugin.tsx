@@ -331,6 +331,11 @@ const SETTINGS_SCHEMA: Record<string, any> = {
         description: "Keep recently-viewed profiles freshly priced on a timer, so the gain/loss chip has a real data point at your chosen window — a true, consistent change on every card. The cadence follows your gain/loss window automatically (a 1h window re-prices hourly; longer windows cap at every ~6h). Light: a handful of price fetches spaced out, no constant CPU use. Turn off to only price profiles when you open them.",
         default: true,
     },
+    watchThresholdPct: {
+        type: OptionType.NUMBER,
+        description: "Watchlist alert sensitivity: get a Discord notice when a watched inventory's value moves at least this % from when you last saw it. Click the 🔔 on any card to watch/unwatch. Needs background refresh on.",
+        default: 5,
+    },
     resetHistory: {
         type: OptionType.BOOLEAN,
         description: "Wipe all stored price snapshots (deltas, sparkline, and diff) for every profile and start fresh. Flip on to clear — it resets itself right after.",
@@ -1390,6 +1395,10 @@ const BUTTON_CSS = `
 }
 .vsi-inv-card .vsi-card-header .vsi-refresh:hover { opacity: 1; background: rgba(255,255,255,.08); color: #f2f3f5; }
 .vsi-inv-card .vsi-card-header .vsi-refresh:active { background: rgba(88,101,242,.25); }
+.vsi-card-actions { display: inline-flex; align-items: center; gap: 2px; }
+.vsi-inv-card .vsi-card-header .vsi-watch { cursor: pointer; opacity: 0.5; font-size: 11px; padding: 2px 4px; border-radius: 4px; line-height: 1; }
+.vsi-inv-card .vsi-card-header .vsi-watch:hover { opacity: 1; background: rgba(255,255,255,.08); }
+.vsi-inv-card .vsi-card-header .vsi-watch.on { opacity: 1; }
 .vsi-inv-card.loading .vsi-refresh {
     animation: vsi-spin 0.9s linear infinite;
     opacity: 1;
@@ -1828,7 +1837,7 @@ function buildButton(shownUserId: string, isOwn: boolean, wantTradeRow: boolean,
         const steamIdSync = getSteamIdSync(shownUserId);
         const snapsSync = steamIdSync ? getSnapshotsSync(steamIdSync) : [];
         if (steamIdSync && snapsSync[0]) {
-            renderPricedCard(card, snapsSync[0], snapsSync.slice(1), buildDiffLineSync(steamIdSync));
+            renderPricedCard(card, snapsSync[0], snapsSync.slice(1), buildDiffLineSync(steamIdSync), steamIdSync);
             maybeAutoRefresh(card, snapsSync[0], shownUserId, isOwn);
         } else {
             card.classList.add("loading");
@@ -1848,13 +1857,28 @@ function buildButton(shownUserId: string, isOwn: boolean, wantTradeRow: boolean,
             populateInventoryCard(card, shownUserId, isOwn).catch(e => console.error("[VSI] populateInventoryCard", e));
         }
 
-        // Delegate refresh / load clicks at the card level so innerHTML rewrites don't kill the handler.
+        // Delegate refresh / load / watch clicks at the card level so innerHTML rewrites don't kill the handler.
         card.addEventListener("click", e => {
             const t = e.target as HTMLElement | null;
             if (t?.closest?.(".vsi-refresh, .vsi-load-btn")) {
                 e.stopPropagation();
                 e.preventDefault();
                 refreshCard(card, shownUserId, isOwn);
+                return;
+            }
+            if (t?.closest?.(".vsi-watch")) {
+                e.stopPropagation();
+                e.preventDefault();
+                const sid = getSteamIdSync(shownUserId);
+                const snap = sid ? getSnapshotsSync(sid)[0] : null;
+                if (!sid || !snap) return;
+                const nm = UserStore?.getUser?.(shownUserId)?.username;
+                const now = toggleWatch(sid, nm, snap.total, snap.currency || 1);
+                const bell = t.closest(".vsi-watch") as HTMLElement;
+                bell.classList.toggle("on", now);
+                bell.textContent = now ? "🔔" : "🔕";
+                bell.title = now ? "Watching — you'll get a notice on big value moves. Click to stop." : "Watch this inventory — get a notice when its value moves past your threshold.";
+                try { BD.UI?.showToast?.(now ? `Watching ${nm || "this inventory"} — alert on ±${settings.store.watchThresholdPct || 5}% moves` : "Stopped watching", { type: now ? "success" : "info" }); } catch { /* */ }
                 return;
             }
             // Anywhere else on a priced card → open the full breakdown modal.
@@ -1991,7 +2015,7 @@ async function populateInventoryCard(card: HTMLElement, shownUserId: string, isO
     }
 
     const history = snaps[0] === latest ? snaps.slice(1) : snaps;
-    renderPricedCard(card, latest, history, await buildDiffLine(steamId));
+    renderPricedCard(card, latest, history, await buildDiffLine(steamId), steamId);
     maybeAutoRefresh(card, latest, shownUserId, isOwn);
 }
 
@@ -2044,6 +2068,46 @@ function maybeAutoRefresh(card: HTMLElement, latest: Snapshot, shownUserId: stri
     refreshCard(card, shownUserId, isOwn).catch(() => { /* */ });
 }
 
+// ─── Watchlist / price alerts ────────────────────────────────────────────────────
+// Watched profiles: steamId → { name, base (last-notified value), currency }. Stored via BdApi.Data.
+// The background tick re-prices them and fires a Discord notice when the value moves past the
+// threshold, then resets the baseline. Add/remove with the 🔔 on any card.
+const WATCH_KEY = "vsi.watchlist";
+interface Watch { name?: string; base: number; currency: number }
+const getWatchlist = (): Record<string, Watch> => { try { return BD.Data.load(PLUGIN_NAME, WATCH_KEY) ?? {}; } catch { return {}; } };
+const saveWatchlist = (w: Record<string, Watch>) => { try { BD.Data.save(PLUGIN_NAME, WATCH_KEY, w); } catch { /* */ } };
+const isWatched = (steamId: string): boolean => !!getWatchlist()[steamId];
+// Toggle a profile on/off the watchlist; returns the new watched state.
+function toggleWatch(steamId: string, name: string | undefined, base: number, currency: number): boolean {
+    const w = getWatchlist();
+    if (w[steamId]) { delete w[steamId]; saveWatchlist(w); return false; }
+    w[steamId] = { name, base, currency };
+    saveWatchlist(w);
+    return true;
+}
+// After the tick re-prices watched profiles, alert on any that moved ≥ threshold since the baseline.
+function checkWatchAlerts(): void {
+    const w = getWatchlist();
+    const ids = Object.keys(w);
+    if (!ids.length) return;
+    const thr = Math.max(0.5, settings.store.watchThresholdPct || 5) / 100;
+    let changed = false;
+    for (const steamId of ids) {
+        const e = w[steamId];
+        const snap = getSnapshotsSync(steamId)[0];
+        if (!snap || (snap.currency || 1) !== e.currency) continue;
+        if (!e.base) { e.base = snap.total; changed = true; continue; }
+        if (Math.abs(snap.total - e.base) / e.base >= thr) {
+            const up = snap.total > e.base;
+            const pct = Math.round(Math.abs(snap.total - e.base) / e.base * 100);
+            try { BD.UI?.showNotice?.(`CS2 Inventory: ${e.name || "a watched inventory"} ${up ? "up" : "down"} ${pct}% → ${fmt(snap.total, e.currency)}`, { type: up ? "success" : "error" }); } catch { /* */ }
+            e.base = snap.total; // reset baseline so it alerts on the NEXT move, not repeatedly
+            changed = true;
+        }
+    }
+    if (changed) saveWatchlist(w);
+}
+
 // ─── Scheduled background refresh ───────────────────────────────────────────────
 // Re-prices recently-viewed profiles on a timer so every tracked card has a real data point at the
 // delta window (a true, consistent 24h change). Deliberately light: it checks every 30 min and
@@ -2082,9 +2146,11 @@ async function backgroundTick() {
     try {
         const now = Date.now();
         const staleMs = bgStaleMs();
+        const watched = new Set(Object.keys(getWatchlist()));
         const stale = trackedSteamIds()
             .map(steamId => ({ steamId, age: now - (getSnapshotsSync(steamId)[0]?.ts ?? 0) }))
-            .filter(x => x.age > staleMs && x.age < BG_RELEVANT_MS)
+            // watched profiles are always eligible (never age out); others only within the relevant window
+            .filter(x => x.age > staleMs && (watched.has(x.steamId) || x.age < BG_RELEVANT_MS))
             .sort((a, b) => b.age - a.age)     // most stale first
             .slice(0, BG_MAX_PER_TICK);
         for (const { steamId } of stale) {
@@ -2092,6 +2158,7 @@ async function backgroundTick() {
             catch { /* private / transient — skip, try again next cycle */ }
             await sleep(3000); // gentle spacing between profiles
         }
+        checkWatchAlerts();
     } finally { bgRunning = false; }
 }
 
@@ -2202,7 +2269,7 @@ function flexChipsHtml(latest: Snapshot, cur: number): string {
 
 // Pure, synchronous card render from a resolved snapshot (+ older history for the delta chip,
 // + the already-computed diff line). Shared by the async populate and the instant sync path.
-function renderPricedCard(card: HTMLElement, latest: Snapshot, history: Snapshot[], changed: string | null) {
+function renderPricedCard(card: HTMLElement, latest: Snapshot, history: Snapshot[], changed: string | null, steamId?: string) {
     const cur = latest.currency || 1;
     const ageMs = Date.now() - latest.ts;
     const staleH = settings.store.snapshotStalenessHours || 0;
@@ -2267,10 +2334,14 @@ function renderPricedCard(card: HTMLElement, latest: Snapshot, history: Snapshot
         sparkHtml = sparklineSvg(series, cur);
     }
 
+    const watched = steamId ? isWatched(steamId) : false;
+    const watchBtn = steamId
+        ? `<span class="vsi-watch${watched ? " on" : ""}" title="${watched ? "Watching — you'll get a notice on big value moves. Click to stop." : "Watch this inventory — get a notice when its value moves past your threshold."}">${watched ? "🔔" : "🔕"}</span>`
+        : "";
     card.innerHTML = `
         <div class="vsi-card-header">
             <span>💼 CS2 Inventory</span>
-            <span class="vsi-refresh" title="Refresh">↻</span>
+            <span class="vsi-card-actions">${watchBtn}<span class="vsi-refresh" title="Refresh">↻</span></span>
         </div>
         <div class="vsi-value-row">
             <span class="vsi-value">${fmt(latest.total, cur)}</span>
