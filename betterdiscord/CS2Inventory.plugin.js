@@ -2,7 +2,7 @@
  * @name CS2Inventory
  * @author VisaHolder
  * @description CS2 inventory value on Discord profile popouts — Doppler/Gamma phase pricing (CSFloat), FX-converted prices, and Trade Offer / Steam buttons.
- * @version 1.5.8
+ * @version 1.5.9
  * @source https://github.com/VisaHolder/cs2-inventory-betterdiscord
  * @website https://github.com/VisaHolder/cs2-inventory-betterdiscord
  */
@@ -2522,8 +2522,8 @@ function patternBadges(name, seed) {
 var fadeBadge = (name, seed) => {
   const { fade, blue } = patternBadges(name, seed);
   let h = "";
-  if (fade != null) h += `<span class="vsi-modal-fade" title="Fade percentage">\u{1F525} ${Math.round(fade)}%</span>`;
-  if (blue != null) h += `<span class="vsi-modal-blue" title="Blue Gem \u2014 playside blue coverage">\u{1F48E} ${blue}%</span>`;
+  if (fade != null) h += `<span class="vsi-modal-fade" title="Fade percentage">${Math.round(fade)}% fade</span>`;
+  if (blue != null) h += `<span class="vsi-modal-blue" title="Blue Gem \u2014 playside blue coverage">${blue}% blue</span>`;
   return h;
 };
 var modalKeyHandler = null;

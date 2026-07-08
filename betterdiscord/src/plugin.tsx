@@ -2487,8 +2487,8 @@ function patternBadges(name: string, seed?: number): { fade: number | null; blue
 const fadeBadge = (name: string, seed?: number): string => {
     const { fade, blue } = patternBadges(name, seed);
     let h = "";
-    if (fade != null) h += `<span class="vsi-modal-fade" title="Fade percentage">🔥 ${Math.round(fade)}%</span>`;
-    if (blue != null) h += `<span class="vsi-modal-blue" title="Blue Gem — playside blue coverage">💎 ${blue}%</span>`;
+    if (fade != null) h += `<span class="vsi-modal-fade" title="Fade percentage">${Math.round(fade)}% fade</span>`;
+    if (blue != null) h += `<span class="vsi-modal-blue" title="Blue Gem — playside blue coverage">${blue}% blue</span>`;
     return h;
 };
 
