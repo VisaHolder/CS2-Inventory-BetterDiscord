@@ -2451,6 +2451,10 @@ const wearTag = (name: string): string => {
 // ── Rare-pattern intel from the paint seed ──────────────────────────────────────
 // Fade % is deterministic (Step7750's calculator, bundled); Blue Gem % is a lookup in a bundled
 // compact dataset (playside/top blue coverage). The finish + weapon come from the market name.
+// Finishes where the paint SEED (pattern) actually drives value — only show #seed on these, else
+// it's noise on skins where every copy looks the same.
+const PATTERN_SKIN_RE = /\b(Case Hardened|Heat Treated|Marble Fade|Fade|Crimson Web|Blue Web|Emerald Web|Slaughter|Hydroponic|Phoenix Blacklight|Kumicho Dragon)\b/i;
+const isPatternSkin = (name: string): boolean => PATTERN_SKIN_RE.test(name);
 const baseWeapon = (name: string): string =>
     name.replace(/^★\s*/, "").replace(/^StatTrak™\s*/, "").replace(/^Souvenir\s*/, "").split("|")[0].trim();
 const finishOf = (name: string): string => (name.match(/\|\s*([^(]+?)\s*(?:\(|$)/)?.[1] ?? "").trim();
@@ -2574,7 +2578,7 @@ async function openInventoryModal(steamId: string, displayName: string) {
                 ${wearTag(i.name)}
                 ${stTag(i.name)}
                 ${i.float != null ? `<span class="vsi-modal-float" title="float / wear value">${i.float.toFixed(4)}</span>` : ""}
-                ${i.seed != null ? `<span class="vsi-modal-seed" title="paint seed / pattern">#${i.seed}</span>` : ""}
+                ${i.seed != null && isPatternSkin(i.name) ? `<span class="vsi-modal-seed" title="paint seed / pattern">#${i.seed}</span>` : ""}
                 ${i.floatFlag ? `<span class="vsi-modal-frank ${i.floatFlag}" title="${i.floatFlag === "low" ? "Ranked low float — a top-tier low wear for this skin (FloatDB)" : "Ranked high float — a top-tier high wear for this skin (FloatDB)"}">${i.floatFlag === "low" ? "🥇 low float" : "high float"}</span>` : ""}
                 ${fadeBadge(i.name, i.seed)}
                 ${badge}
