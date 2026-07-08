@@ -35,12 +35,13 @@ That is the only setting that ever needs a key — everything else works out of 
 
 ## What you get
 
-- Full inventory value in your currency (CSFloat prices + live FX)
+- Full inventory value in your currency (CSFloat prices + live FX), with rarity-colored top items
 - Doppler / Gamma Doppler phase pricing (with the optional key) — Ruby, Sapphire, Black Pearl, Emerald, Phase 1-4
-- Click any card (or right-click a user) for a searchable, sortable breakdown of every item with thumbnails
+- Click any card (or right-click a user) for a searchable, sortable breakdown of every item — thumbnails, rarity colors, StatTrak™ / Souvenir tags, and one click through to each item's Steam Market page
+- Price history sparkline with all-time-high / low markers, a gain/loss delta chip, and a value-milestone badge ($1K / $5K / $10K …)
 - "What changed" line showing items gained / dropped since last time
 - Send Trade Offer + Steam Profile buttons on profiles
-- Commands: `/inventory`, `/leaderboard`, `/compare`
+- Commands: `/inventory`, `/price <item>`, `/leaderboard` (add `here` for this server only), `/compare`
 - Optional applied-sticker value toggle (off by default — applied stickers rarely resell for much)
 - Shared cache: once anyone prices a profile it loads instantly for everyone else, and phase-accurate prices propagate even to people without a key
 - 100% client-side. Only your public SteamID and inventory value are ever shared — no Discord identity, no accounts
