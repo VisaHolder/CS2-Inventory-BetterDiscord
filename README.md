@@ -36,9 +36,10 @@ Full guide: [`betterdiscord/README.md`](betterdiscord/README.md)
 
 ## Features
 
-- **Inventory value** on every profile — total in your currency (CSFloat prices + live FX), top items, item count
+- **Inventory value** on every profile — total in your currency (CSFloat prices + live FX), top items with rarity-colored tiers, item count
 - **Doppler / Gamma Doppler phase pricing** — Ruby, Sapphire, Black Pearl, Emerald, Phase 1-4 (with the optional CSFloat key)
-- **Full breakdown** — click any card for a searchable, sortable list of every item with thumbnails; right-click a user for the same
+- **Full breakdown** — click any card for a searchable, sortable list of every item with thumbnails, rarity colors, StatTrak™ / Souvenir tags, and one click through to each item's Steam Market page; right-click a user for the same
+- **Price history at a glance** — a sparkline with all-time-high / low markers, a gain/loss delta chip, and a value-milestone badge ($1K / $5K / $10K …)
 - **What changed** — each card shows items gained/dropped since last time
 - **Trade Offer + Steam Profile buttons**, auto-detected from a linked Steam or a shared/bio trade URL
 - **Shared cache** — once anyone prices a profile it loads instantly for everyone else, and phase-accurate prices propagate even to users without a key
@@ -48,7 +49,8 @@ Full guide: [`betterdiscord/README.md`](betterdiscord/README.md)
 ## Commands
 
 - `/inventory` — price a user or Steam ref; posts publicly (labeled links) or as an only-you embed with clickable Steam / Trade links
-- `/leaderboard` — the richest CS2 inventories the addon has tracked
+- `/price <item>` — look up any skin's market price, exact or fuzzy match
+- `/leaderboard` — the richest CS2 inventories the addon has tracked (add `here` for just this server)
 - `/compare a b` — two inventories side by side, and who wins by how much
 
 ## Repo layout

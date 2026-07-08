@@ -256,7 +256,12 @@ const SETTINGS_SCHEMA: Record<string, any> = {
     },
     showSparkline: {
         type: OptionType.BOOLEAN,
-        description: "Show a mini price-history trend line on the card, drawn from your past snapshots (green when up, red when down).",
+        description: "Show a mini price-history trend line on the card, drawn from your past snapshots (green when up, red when down), with all-time-high/low markers.",
+        default: true,
+    },
+    showFlexBadges: {
+        type: OptionType.BOOLEAN,
+        description: "Show a value-milestone chip on the card ($1K / $5K / $10K …).",
         default: true,
     },
     compactCard: {
@@ -487,7 +492,7 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 // One priced line in an inventory. `price` is the per-copy value INCLUDING applied stickers;
 // `stickerValue`/`stickerCount` break out the sticker portion (for the badge). `icon` is the
 // Steam icon_url hash; `qty` is how many identical (same skin + same stickers) copies.
-interface PricedItem { name: string; price: number; qty: number; icon?: string; stickerValue?: number; stickerCount?: number }
+interface PricedItem { name: string; price: number; qty: number; icon?: string; stickerValue?: number; stickerCount?: number; rarity?: string; hashName?: string }
 
 interface InventoryResult {
     total: number;
@@ -496,7 +501,7 @@ interface InventoryResult {
     marketableCount: number; // assets that can actually be sold on Steam Market
     uniqueNames: number; // distinct marketable market_hash_names
     isPrivate: boolean;
-    topItems: { name: string; price: number }[];
+    topItems: { name: string; price: number; color?: string }[];
     allItems: PricedItem[]; // full priced list, sorted by value desc — modal + diff
     owned: Record<string, number>; // every marketable item by market_hash_name → qty (pricing-independent) — diff
     stickerTotal: number; // portion of `total` from applied stickers
@@ -633,7 +638,7 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
     // For Dopplers we also resolve the phase from the icon so a Ruby isn't priced as a Phase 3.
     const dopMap = await getDopplerIconMap();
     const wantStickers = settings.store.includeStickerValue === true; // strict opt-in; base value by default
-    interface Meta { name: string; marketable: boolean; phase: string | null; paintIndex: number | null; icon: string; stickers: string[] }
+    interface Meta { name: string; marketable: boolean; phase: string | null; paintIndex: number | null; icon: string; stickers: string[]; rarity: string }
     const metaByKey = new Map<string, Meta>();
     for (const d of inv.descriptions) {
         const name = d.market_hash_name;
@@ -645,12 +650,15 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
             paintIndex: dp?.paintIndex ?? null,
             icon: d.icon_url ?? "",
             stickers: wantStickers ? parseStickers(d) : [],
+            // Steam's per-item `name_color` (hex, no #) IS the CS2 rarity grade — b0c3d9 consumer …
+            // eb4b4b covert … e4ae39 contraband. We tint the card/modal rows by it.
+            rarity: typeof d.name_color === "string" ? d.name_color.replace(/^#/, "").toLowerCase() : "",
         });
     }
 
     // Group identical items. Dopplers group by name+phase; stickered copies group by their sticker
     // set too, so a 4×-Katowice AK isn't averaged in with a bare one (each sticker set prices apart).
-    interface Group { name: string; phase: string | null; paintIndex: number | null; qty: number; icon: string; stickers: string[] }
+    interface Group { name: string; phase: string | null; paintIndex: number | null; qty: number; icon: string; stickers: string[]; rarity: string }
     const groups = new Map<string, Group>();
     const owned = new Map<string, number>(); // every marketable item by name → qty, pricing-independent (diff)
     let marketableCount = 0;
@@ -665,7 +673,7 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
         const gk = `${meta.name}::${meta.phase ?? ""}::${stickerSig}`;
         const g = groups.get(gk);
         if (g) g.qty++;
-        else groups.set(gk, { name: meta.name, phase: meta.phase, paintIndex: meta.paintIndex, qty: 1, icon: meta.icon, stickers: meta.stickers });
+        else groups.set(gk, { name: meta.name, phase: meta.phase, paintIndex: meta.paintIndex, qty: 1, icon: meta.icon, stickers: meta.stickers, rarity: meta.rarity });
     }
     const uniqueNames = [...new Set([...groups.values()].map(g => g.name))];
 
@@ -720,10 +728,10 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
             priced += g.qty;
             const sm = stickerByGroup.get(gk);
             if (sm) stickerTotal += sm.value * g.qty;
-            perItem.push({ name: g.phase ? `${g.name} (${g.phase})` : g.name, price: p, qty: g.qty, icon: g.icon, stickerValue: sm?.value, stickerCount: sm?.count });
+            perItem.push({ name: g.phase ? `${g.name} (${g.phase})` : g.name, price: p, qty: g.qty, icon: g.icon, stickerValue: sm?.value, stickerCount: sm?.count, rarity: g.rarity || undefined, hashName: g.name });
         }
         perItem.sort((a, b) => (b.price * b.qty) - (a.price * a.qty));
-        const topItems = perItem.slice(0, 10).map(i => ({ name: i.qty > 1 ? `${i.name} ×${i.qty}` : i.name, price: i.price * i.qty }));
+        const topItems = perItem.slice(0, 10).map(i => ({ name: i.qty > 1 ? `${i.name} ×${i.qty}` : i.name, price: i.price * i.qty, color: i.rarity }));
         return { total, priced, count: inv.assets.length, marketableCount, uniqueNames: uniqueNames.length, isPrivate: false, topItems, allItems: perItem, owned: Object.fromEntries(owned), stickerTotal, unpriced: unpriced.slice(0, 5), skippedNonMarketable };
     };
 
@@ -799,8 +807,10 @@ interface Snapshot {
     ts: number;
     source: string;
     currency: number;
-    topItems?: { name: string; price: number }[];
+    topItems?: { name: string; price: number; color?: string }[];
     stickerTotal?: number; // portion of total from applied stickers (local snapshots only)
+    rank?: number;   // global leaderboard position (1 = richest), from the shared cache
+    tracked?: number; // how many inventories the cache is tracking
 }
 
 const snapKey = (steamId: string) => `vsi.snap.${steamId}`;
@@ -930,17 +940,22 @@ async function cacheGetInventory(steamId: string, cur: number): Promise<Snapshot
             ts: data.ts,
             source: "csfloat",
             currency: cur,
-            topItems: (data.top_items ?? []).map((t: any) => ({ name: t.name, price: (t.price_usd ?? 0) * fx })),
+            topItems: (data.top_items ?? []).map((t: any) => ({ name: t.name, price: (t.price_usd ?? 0) * fx, color: t.color })),
+            rank: typeof data.rank === "number" ? data.rank : undefined,
+            tracked: typeof data.tracked === "number" ? data.tracked : undefined,
         };
     } catch { return null; }
 }
 
-async function cachePushInventory(steamId: string, snap: Snapshot, name?: string): Promise<void> {
-    if (!settings.store.useSharedCache) return;
+// Returns the pusher's fresh {rank, tracked} from the worker so the card can show a rank chip
+// without an extra round-trip. null when the cache is off or the push failed.
+async function cachePushInventory(steamId: string, snap: Snapshot, name?: string): Promise<{ rank: number; tracked: number } | null> {
+    if (!settings.store.useSharedCache) return null;
     try {
         const fx = await fxFor(snap.currency || 1);
-        if (!fx) return;
-        await fetchJson(`${CACHE_WORKER}/inv/${steamId}`, {
+        if (!fx) return null;
+        const guildId = SelectedGuildStore?.getGuildId?.() || "";
+        const res: any = await fetchJson(`${CACHE_WORKER}/inv/${steamId}`, {
             method: "POST",
             body: {
                 total_usd: snap.total / fx,
@@ -948,17 +963,22 @@ async function cachePushInventory(steamId: string, snap: Snapshot, name?: string
                 item_count: snap.itemCount,
                 marketable_count: snap.marketableCount ?? 0,
                 unique_names: snap.uniqueNames,
-                top_items: (snap.topItems ?? []).map(t => ({ name: t.name, price_usd: t.price / fx })),
+                top_items: (snap.topItems ?? []).map(t => ({ name: t.name, price_usd: t.price / fx, ...(t.color ? { color: t.color } : {}) })),
                 ...(name ? { name } : {}),
+                // Records this inventory on the current server's board too (for /leaderboard here).
+                ...(guildId ? { guild_id: guildId } : {}),
             },
         });
-    } catch { /* cache is best-effort */ }
+        return (res && typeof res.rank === "number") ? { rank: res.rank, tracked: res.tracked ?? 0 } : null;
+    } catch { return null; /* cache is best-effort */ }
 }
 
-// Global leaderboard of the richest cached inventories (USD-canonical → local FX at render).
-async function cacheGetLeaderboard(limit: number, cur: number): Promise<{ steamId: string; total: number; name?: string }[]> {
+// Leaderboard of the richest cached inventories (USD-canonical → local FX at render). Pass a
+// guildId to get that server's board (only inventories priced while someone was in it).
+async function cacheGetLeaderboard(limit: number, cur: number, guildId?: string): Promise<{ steamId: string; total: number; name?: string }[]> {
     try {
-        const data: any = await fetchJson(`${CACHE_WORKER}/leaderboard?limit=${limit}`);
+        const q = `limit=${limit}${guildId ? `&guild=${encodeURIComponent(guildId)}` : ""}`;
+        const data: any = await fetchJson(`${CACHE_WORKER}/leaderboard?${q}`);
         const entries: any[] = Array.isArray(data?.entries) ? data.entries : [];
         const fx = await fxFor(cur);
         return entries.map(e => ({ steamId: String(e.steamId), total: (e.total_usd ?? 0) * fx, name: e.name }));
@@ -1216,6 +1236,26 @@ const BUTTON_CSS = `
     white-space: nowrap;
     flex: 1;
 }
+/* Rarity dot before a top-item name — the item's CS2 grade color (consumer→covert→contraband). */
+.vsi-inv-card .vsi-top-row .vsi-rdot {
+    display: inline-block;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: 1px;
+    flex: none;
+    box-shadow: 0 0 0 1px rgba(0,0,0,.35);
+}
+/* Rank + milestone flex chips under the value */
+.vsi-inv-card .vsi-chips { display: flex; gap: 6px; margin: 0 0 8px; flex-wrap: wrap; }
+.vsi-inv-card .vsi-chip {
+    font-size: 10px; font-weight: 700; letter-spacing: .02em;
+    padding: 2px 7px; border-radius: 999px; line-height: 1.35;
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.vsi-inv-card .vsi-chip.rank { color: #c9d1e6; background: rgba(120,140,220,.16); }
+.vsi-inv-card .vsi-chip.rank.top { color: #ffe08a; background: rgba(230,184,0,.16); }
+.vsi-inv-card .vsi-chip.club { color: #7ee0c0; background: rgba(87,194,160,.16); }
 .vsi-inv-card .vsi-top-row .vsi-top-price {
     color: #f2f3f5;
     font-weight: 700;
@@ -1397,8 +1437,20 @@ const BUTTON_CSS = `
 .vsi-modal-row {
     display: flex; align-items: center; gap: 10px;
     padding: 6px 8px; border-radius: 8px;
+    border-left: 3px solid transparent; /* rarity accent */
+    text-decoration: none; color: inherit; cursor: pointer;
 }
 .vsi-modal-row:hover { background: rgba(255,255,255,.04); }
+.vsi-modal-row:hover .vsi-modal-name { color: #fff; }
+.vsi-modal-row .vsi-modal-ext { opacity: 0; font-size: 11px; color: #949ba4; flex: none; transition: opacity .1s ease; }
+.vsi-modal-row:hover .vsi-modal-ext { opacity: .7; }
+/* StatTrak / Souvenir tag on a modal row */
+.vsi-modal-tag {
+    font-size: 9px; font-weight: 800; letter-spacing: .04em; flex: none;
+    padding: 2px 5px; border-radius: 4px; white-space: nowrap;
+}
+.vsi-modal-tag.st { color: #ff9b63; background: rgba(207,106,50,.16); }
+.vsi-modal-tag.sv { color: #ffd76a; background: rgba(230,184,0,.14); }
 .vsi-modal-thumb {
     width: 44px; height: 34px; flex: none; object-fit: contain;
     background: rgba(255,255,255,.03); border-radius: 5px;
@@ -1539,19 +1591,24 @@ async function priceSteamId(steamId: string, name?: string, onBackgroundUpdate?:
         pushItemsSnap(steamId, { ts: Date.now(), currency: cur, total: r.total, items: r.allItems, owned: r.owned }).catch(() => { /* */ });
 
     // When the background Steam fallback finishes, persist the fuller total, share it, notify.
+    // Push to the cache first so the returned rank/tracked ride on the stored snapshot.
     const onUpdate = onBackgroundUpdate
         ? (final: InventoryResult) => {
             const s = snapFrom(final);
-            pushSnapshot(steamId, s).then(() => { saveItems(final); cachePushInventory(steamId, s, name); onBackgroundUpdate(); }).catch(() => { /* */ });
+            cachePushInventory(steamId, s, name).then(rk => {
+                if (rk) { s.rank = rk.rank; s.tracked = rk.tracked; }
+                return pushSnapshot(steamId, s);
+            }).then(() => { saveItems(final); onBackgroundUpdate(); }).catch(() => { /* */ });
         }
         : undefined;
 
     const inv = await loadInventory(steamId, { source, useLiveFallback, onUpdate });
     if (inv.isPrivate) throw new Error("inventory-private");
     const snap = snapFrom(inv);
+    const rk = await cachePushInventory(steamId, snap, name); // share to the read-through cache (best-effort)
+    if (rk) { snap.rank = rk.rank; snap.tracked = rk.tracked; }
     await pushSnapshot(steamId, snap);
     await saveItems(inv);
-    cachePushInventory(steamId, snap, name); // share to the read-through cache (best-effort)
     return inv;
 }
 
@@ -1633,7 +1690,7 @@ async function populateInventoryCard(card: HTMLElement, shownUserId: string, isO
 // Minimal price-history sparkline from a value series: gradient area fill, a crisp trend-colored
 // line, and a glowing endpoint dot. Green if the series rose overall, red if it fell.
 let sparkSeq = 0;
-function sparklineSvg(values: number[]): string {
+function sparklineSvg(values: number[], cur = 1): string {
     if (values.length < 2) return "";
     const W = 240, H = 30, px = 4, py = 6;
     const min = Math.min(...values), max = Math.max(...values);
@@ -1647,12 +1704,24 @@ function sparklineSvg(values: number[]): string {
     const color = last > first ? "#4ade80" : last < first ? "#f87171" : "#8b8f96";
     const id = `vsg${sparkSeq++}`;
     const lx = X(n - 1).toFixed(1), ly = Y(last).toFixed(1);
+
+    // All-time high / low markers: small hollow rings on the peak and trough of the series, with a
+    // hover tooltip. Skipped when they'd land on the (already-dotted) latest point, or when the
+    // series is flat / too short to have a meaningful extreme.
+    let markers = "";
+    if (n >= 3 && max > min) {
+        const ring = (i: number, col: string, label: string) => (i === n - 1) ? ""
+            : `<circle cx="${X(i).toFixed(1)}" cy="${Y(values[i]).toFixed(1)}" r="2.3" fill="#191a1c" stroke="${col}" stroke-width="1.3" vector-effect="non-scaling-stroke" opacity="0.9"><title>${label} ${fmt(values[i], cur)}</title></circle>`;
+        markers = ring(values.indexOf(max), "#4ade80", "High") + ring(values.indexOf(min), "#f87171", "Low");
+    }
+
     return `<svg class="vsi-spark" viewBox="0 0 ${W} ${H}">`
         + `<defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1">`
         + `<stop offset="0" stop-color="${color}" stop-opacity="0.28"/>`
         + `<stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>`
         + `<path d="${area}" fill="url(#${id})"/>`
         + `<path d="${line}" fill="none" stroke="${color}" stroke-width="1.5" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>`
+        + markers
         + `<circle cx="${lx}" cy="${ly}" r="3.4" fill="${color}" opacity="0.22"/>`
         + `<circle cx="${lx}" cy="${ly}" r="1.7" fill="${color}"/></svg>`;
 }
@@ -1664,6 +1733,33 @@ function maybeAutoRefresh(card: HTMLElement, latest: Snapshot, shownUserId: stri
     const staleH = settings.store.snapshotStalenessHours || 6; // still auto-refresh even if the STALE display is off
     if (Date.now() - latest.ts <= staleH * 3_600_000) return;
     refreshCard(card, shownUserId, isOwn).catch(() => { /* */ });
+}
+
+// A small rarity dot in the item's CS2 grade color, if we know it (hex from Steam's name_color).
+function rarityDotHtml(color?: string): string {
+    if (!color || !/^[0-9a-f]{3}([0-9a-f]{3})?$/i.test(color)) return "";
+    return `<span class="vsi-rdot" style="background:#${color}"></span>`;
+}
+
+// Highest inventory-value milestone reached, in the card's currency (e.g. "$10K", "C$1K", "$1M").
+// Empty below the first tier — no chip for sub-$1K inventories.
+function milestoneLabel(total: number, cur: number): string {
+    const tiers = [1_000_000, 500_000, 250_000, 100_000, 50_000, 25_000, 10_000, 5_000, 1_000];
+    for (const t of tiers) if (total >= t) {
+        const k = t >= 1_000_000 ? `${t / 1_000_000}M` : `${t / 1_000}K`;
+        return `${currencySymbol(cur)}${k}`;
+    }
+    return "";
+}
+
+// Rank + milestone flex chips (gated by showFlexBadges). Rank rides on the snapshot from the
+// shared cache; milestone is derived from the total. Empty string when neither applies.
+function flexChipsHtml(latest: Snapshot, cur: number): string {
+    if (settings.store.showFlexBadges === false) return "";
+    const chips: string[] = [];
+    const club = milestoneLabel(latest.total, cur);
+    if (club) chips.push(`<span class="vsi-chip club" title="Inventory-value milestone">${club}</span>`);
+    return chips.length ? `<div class="vsi-chips">${chips.join("")}</div>` : "";
 }
 
 // Pure, synchronous card render from a resolved snapshot (+ older history for the delta chip,
@@ -1709,7 +1805,7 @@ function renderPricedCard(card: HTMLElement, latest: Snapshot, history: Snapshot
         : topItems.length
             ? `<div class="vsi-top-list">${topItems.map(i => `
                 <div class="vsi-top-row">
-                    <span class="vsi-top-name">${escapeHtml(abbrevItem(i.name))}</span>
+                    <span class="vsi-top-name">${rarityDotHtml(i.color)}${escapeHtml(abbrevItem(i.name))}</span>
                     <span class="vsi-top-price">${fmt(i.price, cur)}</span>
                 </div>
             `).join("")}</div>`
@@ -1721,7 +1817,7 @@ function renderPricedCard(card: HTMLElement, latest: Snapshot, history: Snapshot
     if (settings.store.showSparkline !== false) {
         // Chronological value series (oldest → newest) in the current currency only.
         const series = [...history].reverse().concat(latest).filter(s => (s.currency || 1) === cur).map(s => s.total);
-        sparkHtml = sparklineSvg(series);
+        sparkHtml = sparklineSvg(series, cur);
     }
 
     card.innerHTML = `
@@ -1733,6 +1829,7 @@ function renderPricedCard(card: HTMLElement, latest: Snapshot, history: Snapshot
             <span class="vsi-value">${fmt(latest.total, cur)}</span>
             ${deltaHtml}
         </div>
+        ${flexChipsHtml(latest, cur)}
         ${sparkHtml}
         <div class="vsi-meta">${shortSource} · ${humanAgo(ageMs)}${itemCountBit}${stickerSuffix(latest.stickerTotal, cur)}${staleTag}</div>
         ${topHtml}
@@ -1943,6 +2040,19 @@ function buildForeignRow(tradeUrl: string | null, steamId: string | null): HTMLE
 // Steam economy thumbnail. The akamai host serves the image directly (the cloudflare host 301-redirects).
 const steamThumb = (icon: string) => `https://community.akamai.steamstatic.com/economy/image/${icon}/48x48`;
 
+// The item's Steam Community Market listing page. Prefer the raw market_hash_name (hashName);
+// otherwise strip the phase suffix and any " ×N" qty we appended for display.
+const stripToHashName = (name: string) =>
+    name.replace(/\s*×\d+\s*$/, "").replace(/\s*\((?:Phase [1-4]|Ruby|Sapphire|Black Pearl|Emerald)\)\s*$/i, "");
+const steamMarketUrl = (i: PricedItem) =>
+    `https://steamcommunity.com/market/listings/730/${encodeURIComponent(i.hashName ?? stripToHashName(i.name))}`;
+const rarityAccent = (rarity?: string) =>
+    rarity && /^[0-9a-f]{3}([0-9a-f]{3})?$/i.test(rarity) ? ` style="border-left-color:#${rarity}"` : "";
+// StatTrak / Souvenir tag from the raw market name.
+const stTag = (name: string) =>
+    /StatTrak™/.test(name) ? '<span class="vsi-modal-tag st">ST</span>'
+    : /^Souvenir /.test(name) ? '<span class="vsi-modal-tag sv">SV</span>' : "";
+
 let modalKeyHandler: ((e: KeyboardEvent) => void) | null = null;
 function closeInventoryModal() {
     document.querySelector(".vsi-modal-backdrop")?.remove();
@@ -2003,13 +2113,15 @@ async function openInventoryModal(steamId: string, displayName: string) {
                 ? `<span class="vsi-modal-sticker${sv >= 50 ? " grail" : ""}" title="${i.stickerCount} sticker${i.stickerCount > 1 ? "s" : ""}">+${fmt(sv, cur)}</span>`
                 : "";
             return `
-            <div class="vsi-modal-row">
+            <a class="vsi-modal-row" href="${steamMarketUrl(i)}" target="_blank" rel="noopener noreferrer" title="Open on the Steam Community Market"${rarityAccent(i.rarity)}>
                 ${i.icon ? `<img class="vsi-modal-thumb" src="${steamThumb(i.icon)}" loading="lazy" />` : "<div class=\"vsi-modal-thumb\"></div>"}
                 <span class="vsi-modal-name">${escapeHtml(abbrevItem(i.name))}</span>
+                ${stTag(i.name)}
                 ${badge}
                 ${i.qty > 1 ? `<span class="vsi-modal-qty">×${i.qty}</span>` : ""}
                 <span class="vsi-modal-price">${fmt(i.price * i.qty, cur)}</span>
-            </div>`;
+                <span class="vsi-modal-ext">↗</span>
+            </a>`;
         }).join("");
         listEl.innerHTML = (note ? `<div class="vsi-modal-empty">${escapeHtml(note)}</div>` : "") + rows;
     };
@@ -2279,10 +2391,14 @@ function deliver(ctx: any, markdown: string, embed: any): any {
 // ─── /leaderboard ───────────────────────────────────────────────────────────
 type LbRow = { steamId: string; total: number; name?: string };
 
-async function buildLeaderboard(limit: number): Promise<{ error: string } | { rows: LbRow[]; cur: number }> {
+async function buildLeaderboard(limit: number, guildId?: string): Promise<{ error: string } | { rows: LbRow[]; cur: number }> {
     const cur = settings.store.marketCurrency || 1;
-    const rows = await cacheGetLeaderboard(limit, cur);
-    if (!rows.length) return { error: "No inventories tracked yet — run `/inventory` on someone to seed the leaderboard." };
+    const rows = await cacheGetLeaderboard(limit, cur, guildId);
+    if (!rows.length) return {
+        error: guildId
+            ? "No inventories tracked in this server yet — run `/inventory` on people here to seed it."
+            : "No inventories tracked yet — run `/inventory` on someone to seed the leaderboard.",
+    };
     // Fill any missing display names (old entries) from their Steam persona, in parallel.
     await Promise.all(rows.map(async r => {
         if (!r.name) {
@@ -2299,11 +2415,13 @@ function lbBody(rows: LbRow[], cur: number): string {
     const rw = String(rows.length).length;
     return rows.map((r, i) => `${String(i + 1).padStart(rw)}. ${totals[i].padStart(tw)}  ${r.name}`).join("\n");
 }
-function leaderboardMarkdown(rows: LbRow[], cur: number): string {
-    return `## CS2 Inventory Leaderboard\n-# richest tracked inventories\n\`\`\`\n${lbBody(rows, cur)}\n\`\`\``;
+function leaderboardMarkdown(rows: LbRow[], cur: number, scoped = false): string {
+    const sub = scoped ? "richest inventories tracked in this server" : "richest tracked inventories";
+    return `## CS2 Inventory Leaderboard${scoped ? " — This Server" : ""}\n-# ${sub}\n\`\`\`\n${lbBody(rows, cur)}\n\`\`\``;
 }
-function leaderboardEmbed(rows: LbRow[], cur: number): any {
-    return { color: 0x5865F2, title: "CS2 Inventory Leaderboard", description: `\`\`\`\n${lbBody(rows, cur)}\n\`\`\``, footer: { text: "richest tracked inventories" } };
+function leaderboardEmbed(rows: LbRow[], cur: number, scoped = false): any {
+    const sub = scoped ? "richest inventories tracked in this server" : "richest tracked inventories";
+    return { color: 0x5865F2, title: `CS2 Inventory Leaderboard${scoped ? " — This Server" : ""}`, description: `\`\`\`\n${lbBody(rows, cur)}\n\`\`\``, footer: { text: sub } };
 }
 
 // ─── /compare ───────────────────────────────────────────────────────────────
@@ -2338,6 +2456,52 @@ function compareEmbed(a: Side, b: Side, cur: number): any {
     return { color: 0x5865F2, title: `${a.displayName} vs ${b.displayName}`, description: `\`\`\`\n${compareBody(a, b, cur)}\n\`\`\``, footer: { text: compareVerdict(a, b, cur) } };
 }
 
+// ─── /price ───────────────────────────────────────────────────────────────────
+type PriceHit = { name: string; price: number };
+async function buildPriceLookup(query: string): Promise<{ error: string } | { results: PriceHit[]; cur: number; exact: boolean }> {
+    const q = query.trim();
+    if (!q) return { error: "Give me an item name, e.g. `/price AK-47 | Redline (Field-Tested)`." };
+    const cur = settings.store.marketCurrency || 1;
+    // Live-Steam has no bulk feed to search — fall back to CSFloat's list for the lookup.
+    const stored = settings.store.priceSource as string;
+    const source = stored === "skinport" ? "skinport" : "csfloat";
+    const bulk = await getBulkPrices(source);
+    if (!bulk.size) return { error: "Price feed unavailable right now — try again in a moment." };
+    // Exact match (case-insensitive) → single authoritative result.
+    let exactName: string | null = bulk.has(q) ? q : null;
+    if (!exactName) { const lc = q.toLowerCase(); for (const k of bulk.keys()) if (k.toLowerCase() === lc) { exactName = k; break; } }
+    if (exactName) return { results: [{ name: exactName, price: bulk.get(exactName)! }], cur, exact: true };
+    // Otherwise a fuzzy contains search, richest first.
+    const lc = q.toLowerCase();
+    const matches: PriceHit[] = [];
+    for (const [name, price] of bulk) if (name.toLowerCase().includes(lc)) matches.push({ name, price });
+    if (!matches.length) return { error: `No market item matches **${q}**. Try the full name incl. wear, e.g. \`AK-47 | Redline (Field-Tested)\`.` };
+    matches.sort((a, b) => b.price - a.price);
+    return { results: matches.slice(0, 6), cur, exact: false };
+}
+
+const priceUrl = (name: string) => steamMarketUrl({ name, price: 0, qty: 1 });
+function priceMarkdown(results: PriceHit[], cur: number, exact: boolean): string {
+    if (exact || results.length === 1) {
+        const r = results[0];
+        return `## ${abbrevItem(r.name)} — ${fmt(r.price, cur)}\n-# Steam Market · <${priceUrl(r.name)}>`;
+    }
+    const nums = results.map(r => fmt(r.price, cur));
+    const w = nums.reduce((a, s) => Math.max(a, s.length), 0);
+    const body = results.map((r, k) => `${nums[k].padStart(w)}  ${abbrevItem(r.name)}`).join("\n");
+    return `## Price matches\n-# closest matches, priciest first\n\`\`\`\n${body}\n\`\`\``;
+}
+function priceEmbed(results: PriceHit[], cur: number, exact: boolean): any {
+    if (exact || results.length === 1) {
+        const r = results[0];
+        return { color: 0x5865F2, title: `${abbrevItem(r.name)} — ${fmt(r.price, cur)}`, description: `[Steam Community Market](${priceUrl(r.name)})` };
+    }
+    const nums = results.map(r => fmt(r.price, cur));
+    const w = nums.reduce((a, s) => Math.max(a, s.length), 0);
+    const body = results.map((r, k) => `${nums[k].padStart(w)}  ${abbrevItem(r.name)}`).join("\n");
+    return { color: 0x5865F2, title: "Price matches", description: `\`\`\`\n${body}\n\`\`\``, footer: { text: "closest matches, priciest first" } };
+}
+
 function registerCommands(): void {
     try {
         BD.Commands?.register?.(PLUGIN_NAME, {
@@ -2363,15 +2527,36 @@ function registerCommands(): void {
             description: "Richest CS2 inventories the addon has priced",
             options: [
                 { name: "count", description: "How many to show (default 10, max 25)", type: 4, required: false },
+                { name: "here", description: "Only inventories tracked in this server", type: 5, required: false },
             ],
             execute: async (cmdArgs: any[], ctx: any) => {
                 try {
                     const raw = Number(cmdArgs?.find((a: any) => a.name === "count")?.value);
                     const limit = Math.min(Math.max(Number.isFinite(raw) ? raw : 10, 1), 25);
-                    const d = await buildLeaderboard(limit);
+                    const here = !!cmdArgs?.find((a: any) => a.name === "here")?.value;
+                    const guildId = here ? (SelectedGuildStore?.getGuildId?.() || "") : "";
+                    if (here && !guildId) return { content: "Run `/leaderboard here` inside a server (not a DM)." };
+                    const d = await buildLeaderboard(limit, guildId || undefined);
                     if ("error" in d) return { content: d.error };
-                    return deliver(ctx, leaderboardMarkdown(d.rows, d.cur), leaderboardEmbed(d.rows, d.cur));
+                    return deliver(ctx, leaderboardMarkdown(d.rows, d.cur, !!guildId), leaderboardEmbed(d.rows, d.cur, !!guildId));
                 } catch (e) { console.error("[VSI] /leaderboard", e); return { content: "Couldn't load the leaderboard — try again in a moment." }; }
+            },
+        });
+
+        BD.Commands?.register?.(PLUGIN_NAME, {
+            id: "price",
+            name: "price",
+            description: "Look up the market price of a CS2 item",
+            options: [
+                { name: "item", description: "Item name incl. wear, e.g. AK-47 | Redline (Field-Tested)", type: 3, required: true },
+            ],
+            execute: async (cmdArgs: any[], ctx: any) => {
+                try {
+                    const q = String(cmdArgs?.find((a: any) => a.name === "item")?.value ?? "");
+                    const d = await buildPriceLookup(q);
+                    if ("error" in d) return { content: d.error };
+                    return deliver(ctx, priceMarkdown(d.results, d.cur, d.exact), priceEmbed(d.results, d.cur, d.exact));
+                } catch (e) { console.error("[VSI] /price", e); return { content: "Couldn't look up that price — try again in a moment." }; }
             },
         });
 
