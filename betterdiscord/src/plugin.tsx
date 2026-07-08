@@ -2463,11 +2463,18 @@ function copyText(text: string): boolean {
     return false;
 }
 
+// Steam's legacy `for_item` deep-link pre-adds the owner's exact item to a new trade offer
+// (appid_contextid_assetid; CS2 = 730_2). Needs the OWNER's trade URL (partner+token) — the same
+// one behind the Trade button — plus the item's assetid.
+const createTradeUrl = (ownerTradeUrl: string, assetid: string) =>
+    `${ownerTradeUrl}${ownerTradeUrl.includes("?") ? "&" : "?"}for_item=730_2_${assetid}`;
+
 // Every action available for a row, in menu order. A `url` opens externally; a `copy` writes to the
 // clipboard. Kinds whose data is missing (no inspect payload / no assetid) are omitted.
 interface RowAction { kind: string; label: string; url?: string; copy?: string }
-function rowActions(i: PricedItem, ownerSteamId: string): RowAction[] {
+function rowActions(i: PricedItem, ownerSteamId: string, ownerTradeUrl?: string | null): RowAction[] {
     const out: RowAction[] = [];
+    if (ownerTradeUrl && i.assetid) out.push({ kind: "tradeoffer", label: "Create trade for this item", url: createTradeUrl(ownerTradeUrl, i.assetid) });
     if (i.inspect) out.push({ kind: "inspect", label: "Inspect in-game", url: inspectUrl(i.inspect) });
     if (i.inspect) out.push({ kind: "copyinspect", label: "Copy inspect link", copy: inspectLink(i.inspect) });
     out.push({ kind: "csfloat", label: "Find on CSFloat", url: csfloatSearchUrl(i) });
@@ -2616,6 +2623,12 @@ async function openInventoryModal(steamId: string, displayName: string) {
     closeInventoryModal(); // never stack two
     const cur = settings.store.marketCurrency || 1;
 
+    // Owner's trade URL (partner+token) — enables the "Create trade for this item" right-click action.
+    // Only for a FOREIGN inventory (trading with yourself is pointless); resolved from the shared cache.
+    let ownerTradeUrl: string | null = null;
+    const mySteamId = steamIdFromTradeUrl(settings.store.tradeUrl?.trim() || "");
+    if (steamId !== mySteamId) cacheGetTradeUrl(steamId).then(u => { ownerTradeUrl = u; }).catch(() => { /* */ });
+
     const backdrop = document.createElement("div");
     backdrop.className = "vsi-modal-backdrop";
     backdrop.addEventListener("click", e => { if (e.target === backdrop) closeInventoryModal(); });
@@ -2728,7 +2741,7 @@ async function openInventoryModal(steamId: string, displayName: string) {
         const i = row ? currentRows[+(row.dataset.i ?? -1)] : null;
         if (!i) return;
         e.preventDefault();
-        const acts = rowActions(i, steamId);
+        const acts = rowActions(i, steamId, ownerTradeUrl);
         const mode = (settings.store.rightClickAction as string) || "menu";
         if (mode === "menu") { showItemMenu(e.clientX, e.clientY, acts); return; }
         const chosen = acts.find(a => a.kind === mode) ?? acts.find(a => a.kind === "market");

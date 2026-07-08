@@ -2,7 +2,7 @@
  * @name CS2Inventory
  * @author VisaHolder
  * @description CS2 inventory value on Discord profile popouts — Doppler/Gamma phase pricing (CSFloat), FX-converted prices, and Trade Offer / Steam buttons.
- * @version 1.6.2
+ * @version 1.6.3
  * @source https://github.com/VisaHolder/cs2-inventory-betterdiscord
  * @website https://github.com/VisaHolder/cs2-inventory-betterdiscord
  */
@@ -2494,8 +2494,10 @@ function copyText(text) {
   }
   return false;
 }
-function rowActions(i, ownerSteamId) {
+var createTradeUrl = (ownerTradeUrl, assetid) => `${ownerTradeUrl}${ownerTradeUrl.includes("?") ? "&" : "?"}for_item=730_2_${assetid}`;
+function rowActions(i, ownerSteamId, ownerTradeUrl) {
   const out = [];
+  if (ownerTradeUrl && i.assetid) out.push({ kind: "tradeoffer", label: "Create trade for this item", url: createTradeUrl(ownerTradeUrl, i.assetid) });
   if (i.inspect) out.push({ kind: "inspect", label: "Inspect in-game", url: inspectUrl(i.inspect) });
   if (i.inspect) out.push({ kind: "copyinspect", label: "Copy inspect link", copy: inspectLink(i.inspect) });
   out.push({ kind: "csfloat", label: "Find on CSFloat", url: csfloatSearchUrl(i) });
@@ -2656,6 +2658,12 @@ function closeInventoryModal() {
 async function openInventoryModal(steamId, displayName) {
   closeInventoryModal();
   const cur = settings.store.marketCurrency || 1;
+  let ownerTradeUrl = null;
+  const mySteamId = steamIdFromTradeUrl(settings.store.tradeUrl?.trim() || "");
+  if (steamId !== mySteamId) cacheGetTradeUrl(steamId).then((u) => {
+    ownerTradeUrl = u;
+  }).catch(() => {
+  });
   const backdrop = document.createElement("div");
   backdrop.className = "vsi-modal-backdrop";
   backdrop.addEventListener("click", (e) => {
@@ -2770,7 +2778,7 @@ async function openInventoryModal(steamId, displayName) {
     const i = row ? currentRows[+(row.dataset.i ?? -1)] : null;
     if (!i) return;
     e.preventDefault();
-    const acts = rowActions(i, steamId);
+    const acts = rowActions(i, steamId, ownerTradeUrl);
     const mode = settings.store.rightClickAction || "menu";
     if (mode === "menu") {
       showItemMenu(e.clientX, e.clientY, acts);
