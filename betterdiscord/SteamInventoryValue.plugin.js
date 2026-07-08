@@ -1327,6 +1327,13 @@ var BUTTON_CSS = `
 }
 .vsi-modal-tag.st { color: #ff9b63; background: rgba(207,106,50,.16); }
 .vsi-modal-tag.sv { color: #ffd76a; background: rgba(230,184,0,.14); }
+/* Exterior/wear tag, green (FN) \u2192 red (BS) */
+.vsi-modal-wear { font-size: 9px; font-weight: 800; letter-spacing: .04em; flex: none; padding: 2px 5px; border-radius: 4px; white-space: nowrap; }
+.vsi-modal-wear.fn { color: #4ade80; background: rgba(74,222,128,.14); }
+.vsi-modal-wear.mw { color: #a3e635; background: rgba(163,230,53,.14); }
+.vsi-modal-wear.ft { color: #facc15; background: rgba(250,204,21,.14); }
+.vsi-modal-wear.ww { color: #fb923c; background: rgba(251,146,60,.14); }
+.vsi-modal-wear.bs { color: #f87171; background: rgba(248,113,113,.14); }
 .vsi-modal-thumb {
     width: 44px; height: 34px; flex: none; object-fit: contain;
     background: rgba(255,255,255,.03); border-radius: 5px;
@@ -1857,6 +1864,19 @@ var stripToHashName = (name) => name.replace(/\s*×\d+\s*$/, "").replace(/\s*\((
 var steamMarketUrl = (i) => `https://steamcommunity.com/market/listings/730/${encodeURIComponent(i.hashName ?? stripToHashName(i.name))}`;
 var rarityAccent = (rarity) => rarity && /^[0-9a-f]{3}([0-9a-f]{3})?$/i.test(rarity) ? ` style="border-left-color:#${rarity}"` : "";
 var stTag = (name) => /StatTrak™/.test(name) ? '<span class="vsi-modal-tag st">ST</span>' : /^Souvenir /.test(name) ? '<span class="vsi-modal-tag sv">SV</span>' : "";
+var WEAR_TAGS = {
+  "Factory New": ["FN", "fn"],
+  "Minimal Wear": ["MW", "mw"],
+  "Field-Tested": ["FT", "ft"],
+  "Well-Worn": ["WW", "ww"],
+  "Battle-Scarred": ["BS", "bs"]
+};
+var wearTag = (name) => {
+  const m = name.match(/\((Factory New|Minimal Wear|Field-Tested|Well-Worn|Battle-Scarred)\)/);
+  if (!m) return "";
+  const [abbr, cls] = WEAR_TAGS[m[1]];
+  return `<span class="vsi-modal-wear ${cls}">${abbr}</span>`;
+};
 var modalKeyHandler = null;
 function closeInventoryModal() {
   document.querySelector(".vsi-modal-backdrop")?.remove();
@@ -1927,6 +1947,7 @@ async function openInventoryModal(steamId, displayName) {
             <a class="vsi-modal-row" href="${steamMarketUrl(i)}" target="_blank" rel="noopener noreferrer" title="Open on the Steam Community Market"${rarityAccent(i.rarity)}>
                 ${i.icon ? `<img class="vsi-modal-thumb" src="${steamThumb(i.icon)}" loading="lazy" />` : '<div class="vsi-modal-thumb"></div>'}
                 <span class="vsi-modal-name">${escapeHtml(abbrevItem(i.name))}</span>
+                ${wearTag(i.name)}
                 ${stTag(i.name)}
                 ${badge}
                 ${i.qty > 1 ? `<span class="vsi-modal-qty">\xD7${i.qty}</span>` : ""}
