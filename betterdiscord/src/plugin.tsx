@@ -506,7 +506,7 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 // One priced line in an inventory. `price` is the per-copy value INCLUDING applied stickers;
 // `stickerValue`/`stickerCount` break out the sticker portion (for the badge). `icon` is the
 // Steam icon_url hash; `qty` is how many identical (same skin + same stickers) copies.
-interface PricedItem { name: string; price: number; qty: number; icon?: string; stickerValue?: number; stickerCount?: number; rarity?: string; hashName?: string; float?: number; seed?: number }
+interface PricedItem { name: string; price: number; qty: number; icon?: string; stickerValue?: number; stickerCount?: number; rarity?: string; hashName?: string; float?: number; seed?: number; nametag?: string; catType?: string }
 
 interface InventoryResult {
     total: number;
@@ -525,6 +525,21 @@ interface InventoryResult {
 
 // Applied stickers live in a description's HTML as <img title="Sticker: NAME">, one per copy
 // (duplicates repeat). The market name to price each is "Sticker | NAME".
+// Broad item category from Steam's "Type" tag internal_name, for the breakdown's type filter.
+function normalizeType(internal: string): string {
+    const m: Record<string, string> = {
+        CSGO_Type_Pistol: "Pistols", CSGO_Type_SMG: "SMGs", CSGO_Type_Rifle: "Rifles",
+        CSGO_Type_SniperRifle: "Snipers", CSGO_Type_Shotgun: "Heavy", CSGO_Type_Machinegun: "Heavy",
+        CSGO_Type_Knife: "Knives", CSGO_Type_Hands: "Gloves", CSGO_Tool_Sticker: "Stickers",
+        CSGO_Tool_Keychain: "Charms", CSGO_Type_MusicKit: "Music Kits", CSGO_Type_Spray: "Graffiti",
+        CSGO_Type_Collectible: "Pins", CSGO_Type_WeaponCase: "Cases", CSGO_Tool_WeaponCase: "Cases",
+    };
+    if (m[internal]) return m[internal];
+    if (/CustomPlayer/i.test(internal)) return "Agents";
+    if (/Case|Capsule|Package/i.test(internal)) return "Cases";
+    return "Other";
+}
+
 function parseStickers(desc: any): string[] {
     const out: string[] = [];
     for (const e of (desc?.descriptions ?? [])) {
@@ -648,16 +663,18 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
     if (assets.length === 0) return empty(true);
     const inv = { assets, descriptions };
 
-    // Per-asset float (propertyid 2 "Wear Rating") + paint seed (propertyid 1 "Pattern Template"),
-    // straight from Steam's public inventory response — available for ANY public inventory, no auth.
-    const floatMap = new Map<string, { float?: number; seed?: number }>();
+    // Per-asset float (propertyid 2 "Wear Rating"), paint seed (1 "Pattern Template") and the custom
+    // Name Tag (5) — all in Steam's public inventory response, available for ANY public inventory, no auth.
+    const floatMap = new Map<string, { float?: number; seed?: number; nametag?: string }>();
     for (const w of assetProps) {
-        let fl: number | undefined, sd: number | undefined;
+        let fl: number | undefined, sd: number | undefined, nt: string | undefined;
         for (const p of (w.asset_properties ?? [])) {
-            if (Number(p.propertyid) === 2 && p.float_value != null) { const v = Number(p.float_value); if (v >= 0 && v <= 1) fl = v; }
-            else if (Number(p.propertyid) === 1 && p.int_value != null) { const v = Number(p.int_value); if (v >= 0 && v <= 1000) sd = v; }
+            const id = Number(p.propertyid);
+            if (id === 2 && p.float_value != null) { const v = Number(p.float_value); if (v >= 0 && v <= 1) fl = v; }
+            else if (id === 1 && p.int_value != null) { const v = Number(p.int_value); if (v >= 0 && v <= 1000) sd = v; }
+            else if (id === 5 && typeof p.string_value === "string" && p.string_value.trim()) nt = p.string_value.trim().slice(0, 60);
         }
-        if (fl != null || sd != null) floatMap.set(String(w.assetid), { float: fl, seed: sd });
+        if (fl != null || sd != null || nt) floatMap.set(String(w.assetid), { float: fl, seed: sd, nametag: nt });
     }
 
     // Steam's `marketable` (0/1) tells us if the item can even be listed on the Market.
@@ -666,11 +683,12 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
     // For Dopplers we also resolve the phase from the icon so a Ruby isn't priced as a Phase 3.
     const dopMap = await getDopplerIconMap();
     const wantStickers = settings.store.includeStickerValue === true; // strict opt-in; base value by default
-    interface Meta { name: string; marketable: boolean; phase: string | null; paintIndex: number | null; icon: string; stickers: string[]; rarity: string }
+    interface Meta { name: string; marketable: boolean; phase: string | null; paintIndex: number | null; icon: string; stickers: string[]; rarity: string; catType: string }
     const metaByKey = new Map<string, Meta>();
     for (const d of inv.descriptions) {
         const name = d.market_hash_name;
         const dp = (isDopplerName(name) && d.icon_url) ? (dopMap.get(d.icon_url) ?? null) : null;
+        const typeTag = (d.tags ?? []).find((t: any) => t.category === "Type")?.internal_name ?? "";
         metaByKey.set(`${d.classid}_${d.instanceid}`, {
             name,
             marketable: d.marketable === 1 || d.marketable === "1",
@@ -678,6 +696,7 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
             paintIndex: dp?.paintIndex ?? null,
             icon: d.icon_url ?? "",
             stickers: wantStickers ? parseStickers(d) : [],
+            catType: normalizeType(typeTag),
             // Steam's per-item `name_color` (hex, no #) IS the CS2 rarity grade — b0c3d9 consumer …
             // eb4b4b covert … e4ae39 contraband. We tint the card/modal rows by it.
             rarity: typeof d.name_color === "string" ? d.name_color.replace(/^#/, "").toLowerCase() : "",
@@ -686,7 +705,7 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
 
     // Group identical items. Dopplers group by name+phase; stickered copies group by their sticker
     // set too, so a 4×-Katowice AK isn't averaged in with a bare one (each sticker set prices apart).
-    interface Group { name: string; phase: string | null; paintIndex: number | null; qty: number; icon: string; stickers: string[]; rarity: string; assetids: string[] }
+    interface Group { name: string; phase: string | null; paintIndex: number | null; qty: number; icon: string; stickers: string[]; rarity: string; assetids: string[]; catType: string }
     const groups = new Map<string, Group>();
     const owned = new Map<string, number>(); // every marketable item by name → qty, pricing-independent (diff)
     let marketableCount = 0;
@@ -701,7 +720,7 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
         const gk = `${meta.name}::${meta.phase ?? ""}::${stickerSig}`;
         const g = groups.get(gk);
         if (g) { g.qty++; g.assetids.push(a.assetid); }
-        else groups.set(gk, { name: meta.name, phase: meta.phase, paintIndex: meta.paintIndex, qty: 1, icon: meta.icon, stickers: meta.stickers, rarity: meta.rarity, assetids: [a.assetid] });
+        else groups.set(gk, { name: meta.name, phase: meta.phase, paintIndex: meta.paintIndex, qty: 1, icon: meta.icon, stickers: meta.stickers, rarity: meta.rarity, assetids: [a.assetid], catType: meta.catType });
     }
     const uniqueNames = [...new Set([...groups.values()].map(g => g.name))];
 
@@ -756,9 +775,9 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
             priced += g.qty;
             const sm = stickerByGroup.get(gk);
             if (sm) stickerTotal += sm.value * g.qty;
-            // Per-item float/seed only make sense for a single copy — attach them to singleton groups.
+            // Per-item float/seed/nametag only make sense for a single copy — attach to singleton groups.
             const ap = g.qty === 1 ? floatMap.get(g.assetids[0]) : undefined;
-            perItem.push({ name: g.phase ? `${g.name} (${g.phase})` : g.name, price: p, qty: g.qty, icon: g.icon, stickerValue: sm?.value, stickerCount: sm?.count, rarity: g.rarity || undefined, hashName: g.name, float: ap?.float, seed: ap?.seed });
+            perItem.push({ name: g.phase ? `${g.name} (${g.phase})` : g.name, price: p, qty: g.qty, icon: g.icon, stickerValue: sm?.value, stickerCount: sm?.count, rarity: g.rarity || undefined, hashName: g.name, float: ap?.float, seed: ap?.seed, nametag: ap?.nametag, catType: g.catType });
         }
         perItem.sort((a, b) => (b.price * b.qty) - (a.price * a.qty));
         const topItems = perItem.slice(0, 10).map(i => ({ name: i.qty > 1 ? `${i.name} ×${i.qty}` : i.name, price: i.price * i.qty, color: i.rarity }));
@@ -1511,6 +1530,17 @@ const BUTTON_CSS = `
     padding: 2px 6px; border-radius: 4px; font-variant-numeric: tabular-nums;
 }
 .vsi-modal-float .vsi-modal-seed { color: #9aa4b2; font-weight: 600; margin-left: 3px; }
+/* Custom name tag */
+.vsi-modal-nametag { font-style: italic; color: #c8a2ff; font-weight: 500; }
+/* Type-filter chips */
+.vsi-modal-filters { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 10px; }
+.vsi-modal-filters:empty { display: none; }
+.vsi-modal-chip {
+    cursor: pointer; font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 999px;
+    background: #111214; color: #b5bac1; border: 1px solid rgba(255,255,255,.08); white-space: nowrap;
+}
+.vsi-modal-chip:hover { color: #fff; border-color: rgba(255,255,255,.18); }
+.vsi-modal-chip.active { background: #5865F2; color: #fff; border-color: transparent; }
 .vsi-modal-thumb {
     width: 44px; height: 34px; flex: none; object-fit: contain;
     background: rgba(255,255,255,.03); border-radius: 5px;
@@ -2213,6 +2243,7 @@ async function openInventoryModal(steamId: string, displayName: string) {
             <input class="vsi-modal-search" type="text" placeholder="Search items…" />
             <button class="vsi-modal-sort">Sort: Value</button>
         </div>
+        <div class="vsi-modal-filters"></div>
         <div class="vsi-modal-list"><div class="vsi-modal-empty">Loading…</div></div>
     `;
     backdrop.appendChild(modal);
@@ -2226,18 +2257,44 @@ async function openInventoryModal(steamId: string, displayName: string) {
     const listEl = modal.querySelector<HTMLElement>(".vsi-modal-list")!;
     const searchEl = modal.querySelector<HTMLInputElement>(".vsi-modal-search")!;
     const sortEl = modal.querySelector<HTMLButtonElement>(".vsi-modal-sort")!;
+    const filtersEl = modal.querySelector<HTMLElement>(".vsi-modal-filters")!;
     let items: PricedItem[] = [];
     let total = 0;
     let note = "";
     let loading = true;
     let sortMode: "value" | "name" = "value";
     let query = "";
+    let typeFilter: string | null = null;
+
+    // Type-filter chips: only the categories actually present, in a sensible order, "All" first.
+    // Memoized so it only rebuilds when the category set or active filter changes (not per keystroke).
+    const TYPE_ORDER = ["Knives", "Gloves", "Rifles", "Snipers", "Pistols", "SMGs", "Heavy", "Agents", "Stickers", "Charms", "Graffiti", "Music Kits", "Cases", "Pins", "Other"];
+    let filtersSig = "";
+    const renderFilters = () => {
+        const present = TYPE_ORDER.filter(c => items.some(i => i.catType === c));
+        const sig = present.join("|") + "::" + (typeFilter ?? "");
+        if (sig === filtersSig) return;
+        filtersSig = sig;
+        if (present.length <= 1) { filtersEl.innerHTML = ""; return; }
+        filtersEl.innerHTML = ["All", ...present].map(c => {
+            const active = (c === "All" && !typeFilter) || c === typeFilter;
+            return `<button class="vsi-modal-chip${active ? " active" : ""}" data-cat="${c === "All" ? "" : escapeHtml(c)}">${c}</button>`;
+        }).join("");
+    };
+    filtersEl.addEventListener("click", e => {
+        const chip = (e.target as HTMLElement)?.closest<HTMLElement>(".vsi-modal-chip");
+        if (!chip) return;
+        typeFilter = chip.dataset.cat || null;
+        filtersSig = ""; // force chip active-state rebuild
+        renderFilters(); render();
+    });
 
     const render = () => {
+        renderFilters();
         totalEl.textContent = items.length ? fmt(total, cur) : "";
         if (loading) { listEl.innerHTML = "<div class=\"vsi-modal-empty\">Loading full inventory…</div>"; return; }
         if (!items.length) { listEl.innerHTML = "<div class=\"vsi-modal-empty\">Couldn't load this inventory — it may be private.</div>"; return; }
-        const filtered = items.filter(i => !query || abbrevItem(i.name).toLowerCase().includes(query));
+        const filtered = items.filter(i => (!query || abbrevItem(i.name).toLowerCase().includes(query)) && (!typeFilter || i.catType === typeFilter));
         filtered.sort((a, b) => sortMode === "value"
             ? (b.price * b.qty) - (a.price * a.qty)
             : abbrevItem(a.name).localeCompare(abbrevItem(b.name)));
@@ -2250,7 +2307,7 @@ async function openInventoryModal(steamId: string, displayName: string) {
             return `
             <a class="vsi-modal-row" href="${steamMarketUrl(i)}" target="_blank" rel="noopener noreferrer" title="Open on the Steam Community Market"${rarityAccent(i.rarity)}>
                 ${i.icon ? `<img class="vsi-modal-thumb" src="${steamThumb(i.icon)}" loading="lazy" />` : "<div class=\"vsi-modal-thumb\"></div>"}
-                <span class="vsi-modal-name">${escapeHtml(abbrevItem(i.name))}</span>
+                <span class="vsi-modal-name">${escapeHtml(abbrevItem(i.name))}${i.nametag ? ` <span class="vsi-modal-nametag" title="Custom name tag">“${escapeHtml(i.nametag)}”</span>` : ""}</span>
                 ${wearTag(i.name)}
                 ${stTag(i.name)}
                 ${i.float != null ? `<span class="vsi-modal-float" title="float / wear value${i.seed != null ? ` · paint seed ${i.seed}` : ""}">${i.float.toFixed(4)}${i.seed != null ? ` <span class="vsi-modal-seed">#${i.seed}</span>` : ""}</span>` : ""}

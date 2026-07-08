@@ -472,6 +472,29 @@ async function fetchSteamMarketPrice(marketHashName, currency) {
   }
 }
 var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function normalizeType(internal) {
+  const m = {
+    CSGO_Type_Pistol: "Pistols",
+    CSGO_Type_SMG: "SMGs",
+    CSGO_Type_Rifle: "Rifles",
+    CSGO_Type_SniperRifle: "Snipers",
+    CSGO_Type_Shotgun: "Heavy",
+    CSGO_Type_Machinegun: "Heavy",
+    CSGO_Type_Knife: "Knives",
+    CSGO_Type_Hands: "Gloves",
+    CSGO_Tool_Sticker: "Stickers",
+    CSGO_Tool_Keychain: "Charms",
+    CSGO_Type_MusicKit: "Music Kits",
+    CSGO_Type_Spray: "Graffiti",
+    CSGO_Type_Collectible: "Pins",
+    CSGO_Type_WeaponCase: "Cases",
+    CSGO_Tool_WeaponCase: "Cases"
+  };
+  if (m[internal]) return m[internal];
+  if (/CustomPlayer/i.test(internal)) return "Agents";
+  if (/Case|Capsule|Package/i.test(internal)) return "Cases";
+  return "Other";
+}
 function parseStickers(desc) {
   const out = [];
   for (const e of desc?.descriptions ?? []) {
@@ -584,17 +607,18 @@ async function loadInventory(steamId, opts) {
   const inv = { assets, descriptions };
   const floatMap = /* @__PURE__ */ new Map();
   for (const w of assetProps) {
-    let fl, sd;
+    let fl, sd, nt;
     for (const p of w.asset_properties ?? []) {
-      if (Number(p.propertyid) === 2 && p.float_value != null) {
+      const id = Number(p.propertyid);
+      if (id === 2 && p.float_value != null) {
         const v = Number(p.float_value);
         if (v >= 0 && v <= 1) fl = v;
-      } else if (Number(p.propertyid) === 1 && p.int_value != null) {
+      } else if (id === 1 && p.int_value != null) {
         const v = Number(p.int_value);
         if (v >= 0 && v <= 1e3) sd = v;
-      }
+      } else if (id === 5 && typeof p.string_value === "string" && p.string_value.trim()) nt = p.string_value.trim().slice(0, 60);
     }
-    if (fl != null || sd != null) floatMap.set(String(w.assetid), { float: fl, seed: sd });
+    if (fl != null || sd != null || nt) floatMap.set(String(w.assetid), { float: fl, seed: sd, nametag: nt });
   }
   const dopMap = await getDopplerIconMap();
   const wantStickers = settings.store.includeStickerValue === true;
@@ -602,6 +626,7 @@ async function loadInventory(steamId, opts) {
   for (const d of inv.descriptions) {
     const name = d.market_hash_name;
     const dp = isDopplerName(name) && d.icon_url ? dopMap.get(d.icon_url) ?? null : null;
+    const typeTag = (d.tags ?? []).find((t) => t.category === "Type")?.internal_name ?? "";
     metaByKey.set(`${d.classid}_${d.instanceid}`, {
       name,
       marketable: d.marketable === 1 || d.marketable === "1",
@@ -609,6 +634,7 @@ async function loadInventory(steamId, opts) {
       paintIndex: dp?.paintIndex ?? null,
       icon: d.icon_url ?? "",
       stickers: wantStickers ? parseStickers(d) : [],
+      catType: normalizeType(typeTag),
       // Steam's per-item `name_color` (hex, no #) IS the CS2 rarity grade — b0c3d9 consumer …
       // eb4b4b covert … e4ae39 contraband. We tint the card/modal rows by it.
       rarity: typeof d.name_color === "string" ? d.name_color.replace(/^#/, "").toLowerCase() : ""
@@ -633,7 +659,7 @@ async function loadInventory(steamId, opts) {
     if (g) {
       g.qty++;
       g.assetids.push(a.assetid);
-    } else groups.set(gk, { name: meta.name, phase: meta.phase, paintIndex: meta.paintIndex, qty: 1, icon: meta.icon, stickers: meta.stickers, rarity: meta.rarity, assetids: [a.assetid] });
+    } else groups.set(gk, { name: meta.name, phase: meta.phase, paintIndex: meta.paintIndex, qty: 1, icon: meta.icon, stickers: meta.stickers, rarity: meta.rarity, assetids: [a.assetid], catType: meta.catType });
   }
   const uniqueNames = [...new Set([...groups.values()].map((g) => g.name))];
   const priceByName = /* @__PURE__ */ new Map();
@@ -682,7 +708,7 @@ async function loadInventory(steamId, opts) {
       const sm = stickerByGroup.get(gk);
       if (sm) stickerTotal += sm.value * g.qty;
       const ap = g.qty === 1 ? floatMap.get(g.assetids[0]) : void 0;
-      perItem.push({ name: g.phase ? `${g.name} (${g.phase})` : g.name, price: p, qty: g.qty, icon: g.icon, stickerValue: sm?.value, stickerCount: sm?.count, rarity: g.rarity || void 0, hashName: g.name, float: ap?.float, seed: ap?.seed });
+      perItem.push({ name: g.phase ? `${g.name} (${g.phase})` : g.name, price: p, qty: g.qty, icon: g.icon, stickerValue: sm?.value, stickerCount: sm?.count, rarity: g.rarity || void 0, hashName: g.name, float: ap?.float, seed: ap?.seed, nametag: ap?.nametag, catType: g.catType });
     }
     perItem.sort((a, b) => b.price * b.qty - a.price * a.qty);
     const topItems = perItem.slice(0, 10).map((i) => ({ name: i.qty > 1 ? `${i.name} \xD7${i.qty}` : i.name, price: i.price * i.qty, color: i.rarity }));
@@ -1360,6 +1386,17 @@ var BUTTON_CSS = `
     padding: 2px 6px; border-radius: 4px; font-variant-numeric: tabular-nums;
 }
 .vsi-modal-float .vsi-modal-seed { color: #9aa4b2; font-weight: 600; margin-left: 3px; }
+/* Custom name tag */
+.vsi-modal-nametag { font-style: italic; color: #c8a2ff; font-weight: 500; }
+/* Type-filter chips */
+.vsi-modal-filters { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 10px; }
+.vsi-modal-filters:empty { display: none; }
+.vsi-modal-chip {
+    cursor: pointer; font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 999px;
+    background: #111214; color: #b5bac1; border: 1px solid rgba(255,255,255,.08); white-space: nowrap;
+}
+.vsi-modal-chip:hover { color: #fff; border-color: rgba(255,255,255,.18); }
+.vsi-modal-chip.active { background: #5865F2; color: #fff; border-color: transparent; }
 .vsi-modal-thumb {
     width: 44px; height: 34px; flex: none; object-fit: contain;
     background: rgba(255,255,255,.03); border-radius: 5px;
@@ -1931,6 +1968,7 @@ async function openInventoryModal(steamId, displayName) {
             <input class="vsi-modal-search" type="text" placeholder="Search items\u2026" />
             <button class="vsi-modal-sort">Sort: Value</button>
         </div>
+        <div class="vsi-modal-filters"></div>
         <div class="vsi-modal-list"><div class="vsi-modal-empty">Loading\u2026</div></div>
     `;
   backdrop.appendChild(modal);
@@ -1944,13 +1982,40 @@ async function openInventoryModal(steamId, displayName) {
   const listEl = modal.querySelector(".vsi-modal-list");
   const searchEl = modal.querySelector(".vsi-modal-search");
   const sortEl = modal.querySelector(".vsi-modal-sort");
+  const filtersEl = modal.querySelector(".vsi-modal-filters");
   let items = [];
   let total = 0;
   let note = "";
   let loading = true;
   let sortMode = "value";
   let query = "";
+  let typeFilter = null;
+  const TYPE_ORDER = ["Knives", "Gloves", "Rifles", "Snipers", "Pistols", "SMGs", "Heavy", "Agents", "Stickers", "Charms", "Graffiti", "Music Kits", "Cases", "Pins", "Other"];
+  let filtersSig = "";
+  const renderFilters = () => {
+    const present = TYPE_ORDER.filter((c) => items.some((i) => i.catType === c));
+    const sig = present.join("|") + "::" + (typeFilter ?? "");
+    if (sig === filtersSig) return;
+    filtersSig = sig;
+    if (present.length <= 1) {
+      filtersEl.innerHTML = "";
+      return;
+    }
+    filtersEl.innerHTML = ["All", ...present].map((c) => {
+      const active = c === "All" && !typeFilter || c === typeFilter;
+      return `<button class="vsi-modal-chip${active ? " active" : ""}" data-cat="${c === "All" ? "" : escapeHtml(c)}">${c}</button>`;
+    }).join("");
+  };
+  filtersEl.addEventListener("click", (e) => {
+    const chip = e.target?.closest(".vsi-modal-chip");
+    if (!chip) return;
+    typeFilter = chip.dataset.cat || null;
+    filtersSig = "";
+    renderFilters();
+    render();
+  });
   const render = () => {
+    renderFilters();
     totalEl.textContent = items.length ? fmt(total, cur) : "";
     if (loading) {
       listEl.innerHTML = '<div class="vsi-modal-empty">Loading full inventory\u2026</div>';
@@ -1960,7 +2025,7 @@ async function openInventoryModal(steamId, displayName) {
       listEl.innerHTML = `<div class="vsi-modal-empty">Couldn't load this inventory \u2014 it may be private.</div>`;
       return;
     }
-    const filtered = items.filter((i) => !query || abbrevItem(i.name).toLowerCase().includes(query));
+    const filtered = items.filter((i) => (!query || abbrevItem(i.name).toLowerCase().includes(query)) && (!typeFilter || i.catType === typeFilter));
     filtered.sort((a, b) => sortMode === "value" ? b.price * b.qty - a.price * a.qty : abbrevItem(a.name).localeCompare(abbrevItem(b.name)));
     if (!filtered.length) {
       listEl.innerHTML = '<div class="vsi-modal-empty">No items match your search.</div>';
@@ -1972,7 +2037,7 @@ async function openInventoryModal(steamId, displayName) {
       return `
             <a class="vsi-modal-row" href="${steamMarketUrl(i)}" target="_blank" rel="noopener noreferrer" title="Open on the Steam Community Market"${rarityAccent(i.rarity)}>
                 ${i.icon ? `<img class="vsi-modal-thumb" src="${steamThumb(i.icon)}" loading="lazy" />` : '<div class="vsi-modal-thumb"></div>'}
-                <span class="vsi-modal-name">${escapeHtml(abbrevItem(i.name))}</span>
+                <span class="vsi-modal-name">${escapeHtml(abbrevItem(i.name))}${i.nametag ? ` <span class="vsi-modal-nametag" title="Custom name tag">\u201C${escapeHtml(i.nametag)}\u201D</span>` : ""}</span>
                 ${wearTag(i.name)}
                 ${stTag(i.name)}
                 ${i.float != null ? `<span class="vsi-modal-float" title="float / wear value${i.seed != null ? ` \xB7 paint seed ${i.seed}` : ""}">${i.float.toFixed(4)}${i.seed != null ? ` <span class="vsi-modal-seed">#${i.seed}</span>` : ""}</span>` : ""}
