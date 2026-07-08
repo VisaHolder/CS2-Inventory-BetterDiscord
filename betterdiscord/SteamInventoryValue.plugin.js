@@ -2,7 +2,7 @@
  * @name SteamInventoryValue
  * @author VisaHolder
  * @description CS2 inventory value on Discord profile popouts — Doppler/Gamma phase pricing (CSFloat), FX-converted prices, and Trade Offer / Steam buttons.
- * @version 1.5.2
+ * @version 1.5.3
  * @source https://github.com/VisaHolder/steam-inventory-value
  * @website https://github.com/VisaHolder/steam-inventory-value
  */
@@ -600,6 +600,11 @@ var SETTINGS_SCHEMA = {
     type: OptionType.BOOLEAN,
     description: "Wipe all stored price snapshots (deltas, sparkline, and diff) for every profile and start fresh. Flip on to clear \u2014 it resets itself right after.",
     default: false
+  },
+  autoUpdateCheck: {
+    type: OptionType.BOOLEAN,
+    description: "Check GitHub for a newer version on load and offer a one-click update (it downloads and reloads itself \u2014 no manual re-download). Turn off to never check.",
+    default: true
   },
   showItemCount: {
     type: OptionType.BOOLEAN,
@@ -2071,6 +2076,55 @@ function stopBackgroundRefresh() {
     bgSeedTimer = null;
   }
 }
+var UPDATE_URL = "https://raw.githubusercontent.com/VisaHolder/steam-inventory-value/main/betterdiscord/SteamInventoryValue.plugin.js";
+function compareVersions(a, b) {
+  const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d) return d;
+  }
+  return 0;
+}
+function installUpdate(remote, content) {
+  try {
+    const folder = BD.Plugins?.folder;
+    if (!folder) throw new Error("no plugins folder");
+    require("fs").writeFileSync(`${folder}/${PLUGIN_NAME}.plugin.js`, content);
+    try {
+      BD.UI?.showToast?.(`Updated to v${remote} \u2014 reloading\u2026`, { type: "success" });
+    } catch {
+    }
+  } catch (e) {
+    console.error("[VSI] update install failed", e);
+    try {
+      BD.UI?.showToast?.("Update failed \u2014 grab it from the GitHub releases page.", { type: "error" });
+    } catch {
+    }
+  }
+}
+async function checkForUpdate() {
+  if (settings.store.autoUpdateCheck === false) return;
+  const local = BD.Plugins?.get?.(PLUGIN_NAME)?.version;
+  if (!local) return;
+  let content;
+  try {
+    content = await fetchText(UPDATE_URL);
+  } catch {
+    return;
+  }
+  const remote = content.match(/@version\s+([\d.]+)/)?.[1];
+  if (!remote || compareVersions(remote, local) <= 0) return;
+  try {
+    BD.UI.showConfirmationModal(
+      "CS2 Inventory \u2014 update available",
+      `Version ${remote} is out (you have ${local}). Update now and it reloads itself \u2014 no manual download needed.`,
+      { confirmText: "Update now", cancelText: "Later", onConfirm: () => installUpdate(remote, content) }
+    );
+  } catch (e) {
+    console.error("[VSI] update prompt", e);
+  }
+}
 var TOKEN_URL = "https://steamcommunity.com/pointssummary/ajaxgetasyncconfig";
 function maybePromptToken() {
   try {
@@ -3068,6 +3122,12 @@ module.exports = class SteamInventoryValue {
       maybePromptToken();
     } catch (e) {
       console.error("[VSI] maybePromptToken", e);
+    }
+    try {
+      setTimeout(() => checkForUpdate().catch(() => {
+      }), 8e3);
+    } catch (e) {
+      console.error("[VSI] checkForUpdate", e);
     }
     try {
       cachePushTradeUrl().catch(() => {

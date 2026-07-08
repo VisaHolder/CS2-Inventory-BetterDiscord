@@ -311,6 +311,11 @@ const SETTINGS_SCHEMA: Record<string, any> = {
         description: "Wipe all stored price snapshots (deltas, sparkline, and diff) for every profile and start fresh. Flip on to clear — it resets itself right after.",
         default: false,
     },
+    autoUpdateCheck: {
+        type: OptionType.BOOLEAN,
+        description: "Check GitHub for a newer version on load and offer a one-click update (it downloads and reloads itself — no manual re-download). Turn off to never check.",
+        default: true,
+    },
     showItemCount: {
         type: OptionType.BOOLEAN,
         description: 'Add "X items" to the card meta line.',
@@ -1961,6 +1966,44 @@ function stopBackgroundRefresh() {
     if (bgSeedTimer) { clearTimeout(bgSeedTimer); bgSeedTimer = null; }
 }
 
+// ── Self-updater ────────────────────────────────────────────────────────────────
+// Checks the built plugin committed on `main` for a newer @version, and (on confirm) writes it over
+// the local file — BetterDiscord's file watcher then reloads the plugin. No manual re-download.
+const UPDATE_URL = "https://raw.githubusercontent.com/VisaHolder/steam-inventory-value/main/betterdiscord/SteamInventoryValue.plugin.js";
+function compareVersions(a: string, b: string): number {
+    const pa = a.split(".").map(n => parseInt(n, 10) || 0);
+    const pb = b.split(".").map(n => parseInt(n, 10) || 0);
+    for (let i = 0; i < Math.max(pa.length, pb.length); i++) { const d = (pa[i] || 0) - (pb[i] || 0); if (d) return d; }
+    return 0;
+}
+function installUpdate(remote: string, content: string) {
+    try {
+        const folder = (BD as any).Plugins?.folder;
+        if (!folder) throw new Error("no plugins folder");
+        require("fs").writeFileSync(`${folder}/${PLUGIN_NAME}.plugin.js`, content);
+        try { BD.UI?.showToast?.(`Updated to v${remote} — reloading…`, { type: "success" }); } catch { /* */ }
+    } catch (e) {
+        console.error("[VSI] update install failed", e);
+        try { BD.UI?.showToast?.("Update failed — grab it from the GitHub releases page.", { type: "error" }); } catch { /* */ }
+    }
+}
+async function checkForUpdate() {
+    if (settings.store.autoUpdateCheck === false) return;
+    const local = (BD as any).Plugins?.get?.(PLUGIN_NAME)?.version;
+    if (!local) return; // can't determine our own version → don't risk a false prompt
+    let content: string;
+    try { content = await fetchText(UPDATE_URL); } catch { return; } // offline / rate-limited → silently skip
+    const remote = content.match(/@version\s+([\d.]+)/)?.[1];
+    if (!remote || compareVersions(remote, local) <= 0) return; // up to date
+    try {
+        BD.UI.showConfirmationModal(
+            "CS2 Inventory — update available",
+            `Version ${remote} is out (you have ${local}). Update now and it reloads itself — no manual download needed.`,
+            { confirmText: "Update now", cancelText: "Later", onConfirm: () => installUpdate(remote, content) },
+        );
+    } catch (e) { console.error("[VSI] update prompt", e); }
+}
+
 // First-load nudge: if no Steam token is set yet, show a one-time notice with a link to grab it
 // (unlocks your own full inventory — trade-held gloves/knives — and exact floats). Optional; other
 // people's floats work without it. Suppressed once the user sets a token or clicks "Don't ask again".
@@ -3001,6 +3044,7 @@ module.exports = class SteamInventoryValue {
         try { registerContextMenu(); } catch (e) { console.error("[VSI] registerContextMenu", e); }
         try { startBackgroundRefresh(); } catch (e) { console.error("[VSI] startBackgroundRefresh", e); }
         try { maybePromptToken(); } catch (e) { console.error("[VSI] maybePromptToken", e); }
+        try { setTimeout(() => checkForUpdate().catch(() => { /* */ }), 8000); } catch (e) { console.error("[VSI] checkForUpdate", e); }
         // Re-publish your trade URL each launch so it stays live in the shared cache.
         try { cachePushTradeUrl().catch(() => { /* best-effort */ }); } catch (e) { console.error("[VSI] cachePushTradeUrl", e); }
     }
