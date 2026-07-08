@@ -2046,6 +2046,35 @@ function stopBackgroundRefresh() {
     bgSeedTimer = null;
   }
 }
+var TOKEN_URL = "https://steamcommunity.com/pointssummary/ajaxgetasyncconfig";
+function maybePromptToken() {
+  try {
+    if ((settings.store.steamWebApiToken || "").trim()) return;
+    if (BD.Data.load(PLUGIN_NAME, "vsi.tokenPromptDone")) return;
+    if (!BD.UI?.showNotice) return;
+    const close = BD.UI.showNotice(
+      "CS2 Inventory: add a free Steam token to show YOUR full inventory (trade-held gloves & knives) + exact floats. Paste it into the plugin's Steam Web Api Token setting.",
+      {
+        type: "info",
+        buttons: [
+          { label: "Get my token", onClick: () => openProtocol(TOKEN_URL) },
+          { label: "Don't ask again", onClick: () => {
+            try {
+              BD.Data.save(PLUGIN_NAME, "vsi.tokenPromptDone", true);
+            } catch {
+            }
+            try {
+              close?.();
+            } catch {
+            }
+          } }
+        ]
+      }
+    );
+  } catch (e) {
+    console.error("[VSI] token prompt", e);
+  }
+}
 function rarityDotHtml(color) {
   if (!color || !/^[0-9a-f]{3}([0-9a-f]{3})?$/i.test(color)) return "";
   return `<span class="vsi-rdot" style="background:#${color}"></span>`;
@@ -2979,6 +3008,11 @@ module.exports = class SteamInventoryValue {
       startBackgroundRefresh();
     } catch (e) {
       console.error("[VSI] startBackgroundRefresh", e);
+    }
+    try {
+      maybePromptToken();
+    } catch (e) {
+      console.error("[VSI] maybePromptToken", e);
     }
     try {
       cachePushTradeUrl().catch(() => {

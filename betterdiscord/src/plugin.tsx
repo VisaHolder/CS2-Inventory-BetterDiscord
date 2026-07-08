@@ -1933,6 +1933,28 @@ function stopBackgroundRefresh() {
     if (bgSeedTimer) { clearTimeout(bgSeedTimer); bgSeedTimer = null; }
 }
 
+// First-load nudge: if no Steam token is set yet, show a one-time notice with a link to grab it
+// (unlocks your own full inventory — trade-held gloves/knives — and exact floats). Optional; other
+// people's floats work without it. Suppressed once the user sets a token or clicks "Don't ask again".
+const TOKEN_URL = "https://steamcommunity.com/pointssummary/ajaxgetasyncconfig";
+function maybePromptToken() {
+    try {
+        if ((settings.store.steamWebApiToken || "").trim()) return;
+        if (BD.Data.load(PLUGIN_NAME, "vsi.tokenPromptDone")) return;
+        if (!BD.UI?.showNotice) return;
+        const close = BD.UI.showNotice(
+            "CS2 Inventory: add a free Steam token to show YOUR full inventory (trade-held gloves & knives) + exact floats. Paste it into the plugin's Steam Web Api Token setting.",
+            {
+                type: "info",
+                buttons: [
+                    { label: "Get my token", onClick: () => openProtocol(TOKEN_URL) },
+                    { label: "Don't ask again", onClick: () => { try { BD.Data.save(PLUGIN_NAME, "vsi.tokenPromptDone", true); } catch { /* */ } try { close?.(); } catch { /* */ } } },
+                ],
+            },
+        );
+    } catch (e) { console.error("[VSI] token prompt", e); }
+}
+
 // A small rarity dot in the item's CS2 grade color, if we know it (hex from Steam's name_color).
 function rarityDotHtml(color?: string): string {
     if (!color || !/^[0-9a-f]{3}([0-9a-f]{3})?$/i.test(color)) return "";
@@ -2920,6 +2942,7 @@ module.exports = class SteamInventoryValue {
         try { registerCommands(); } catch (e) { console.error("[VSI] registerCommands", e); }
         try { registerContextMenu(); } catch (e) { console.error("[VSI] registerContextMenu", e); }
         try { startBackgroundRefresh(); } catch (e) { console.error("[VSI] startBackgroundRefresh", e); }
+        try { maybePromptToken(); } catch (e) { console.error("[VSI] maybePromptToken", e); }
         // Re-publish your trade URL each launch so it stays live in the shared cache.
         try { cachePushTradeUrl().catch(() => { /* best-effort */ }); } catch (e) { console.error("[VSI] cachePushTradeUrl", e); }
     }
