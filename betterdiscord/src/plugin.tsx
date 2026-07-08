@@ -1729,15 +1729,15 @@ const BUTTON_CSS = `
 /* Custom name tag */
 .vsi-modal-nametag { font-style: italic; color: #c8a2ff; font-weight: 500; }
 /* Type-filter chips */
-.vsi-modal-filters { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 16px 10px; }
+.vsi-modal-filters { display: flex; flex-direction: column; gap: 6px; padding: 0 16px 10px; }
 .vsi-modal-filters:empty { display: none; }
+.vsi-modal-chiprow { display: flex; flex-wrap: wrap; gap: 6px; }
 .vsi-modal-chip {
     cursor: pointer; font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: 999px;
     background: #111214; color: #b5bac1; border: 1px solid rgba(255,255,255,.08); white-space: nowrap;
 }
 .vsi-modal-chip:hover { color: #fff; border-color: rgba(255,255,255,.18); }
 .vsi-modal-chip.active { background: #5865F2; color: #fff; border-color: transparent; }
-.vsi-modal-chip-break { flex-basis: 100%; height: 0; }
 .vsi-modal-rchip { font-size: 10px; padding: 3px 8px; }
 .vsi-modal-rchip.active { background: rgba(255,255,255,.10); color: #fff; }
 .vsi-modal-thumb {
@@ -2857,12 +2857,15 @@ async function openInventoryModal(steamId: string, displayName: string) {
             const active = (c === "All" && !typeFilter) || c === typeFilter;
             return `<button class="vsi-modal-chip${active ? " active" : ""}" data-cat="${c === "All" ? "" : escapeHtml(c)}">${c}</button>`;
         }).join("");
-        const rarityChips = rarities.length <= 1 ? "" : `<div class="vsi-modal-chip-break"></div>` + [["", "All"] as [string, string]].concat(rarities.map(h => [h, RARITY_TIERS[h]?.name ?? "★"] as [string, string])).map(([hex, label]) => {
+        const rarityChips = rarities.length <= 1 ? "" : [["", "All"] as [string, string]].concat(rarities.map(h => [h, RARITY_TIERS[h]?.name ?? "★"] as [string, string])).map(([hex, label]) => {
             const active = (!hex && !rarityFilter) || hex === rarityFilter;
             const tint = hex ? ` style="color:#${hex}"` : "";
             return `<button class="vsi-modal-chip vsi-modal-rchip${active ? " active" : ""}" data-rarity="${hex}"${tint}>${label}</button>`;
         }).join("");
-        filtersEl.innerHTML = typeChips + rarityChips;
+        // Two clean rows (type, then rarity) — a flex column so the gap between rows is exactly one
+        // gap, not the double-gap a full-width wrap spacer produced.
+        filtersEl.innerHTML = (typeChips ? `<div class="vsi-modal-chiprow">${typeChips}</div>` : "")
+            + (rarityChips ? `<div class="vsi-modal-chiprow">${rarityChips}</div>` : "");
     };
     filtersEl.addEventListener("click", e => {
         const chip = (e.target as HTMLElement)?.closest<HTMLElement>(".vsi-modal-chip");
