@@ -2,7 +2,7 @@
  * @name CS2Inventory
  * @author VisaHolder
  * @description CS2 inventory value on Discord profile popouts — Doppler/Gamma phase pricing (CSFloat), FX-converted prices, and Trade Offer / Steam buttons.
- * @version 1.7.0
+ * @version 1.7.1
  * @source https://github.com/VisaHolder/cs2-inventory-betterdiscord
  * @website https://github.com/VisaHolder/cs2-inventory-betterdiscord
  */
@@ -1871,8 +1871,11 @@ var BUTTON_CSS = `
 }
 .vsi-modal-chip:hover { color: #fff; border-color: rgba(255,255,255,.18); }
 .vsi-modal-chip.active { background: #5865F2; color: #fff; border-color: transparent; }
-.vsi-modal-rchip { font-size: 10px; padding: 3px 8px; }
-.vsi-modal-rchip.active { background: rgba(255,255,255,.10); color: #fff; }
+/* Rarity: light grade-colored tags \u2014 secondary to the bold type pills. Dim until selected. */
+.vsi-modal-rrow { margin-top: 1px; }
+.vsi-modal-rchip { cursor: pointer; font-size: 10px; font-weight: 700; letter-spacing: .02em; padding: 2px 7px; border-radius: 5px; background: transparent; border: 1px solid transparent; opacity: .55; white-space: nowrap; }
+.vsi-modal-rchip:hover { opacity: 1; background: rgba(255,255,255,.05); }
+.vsi-modal-rchip.active { opacity: 1; background: rgba(255,255,255,.09); border-color: rgba(255,255,255,.14); }
 .vsi-modal-thumb {
     width: 44px; height: 34px; flex: none; object-fit: contain;
     background: rgba(255,255,255,.03); border-radius: 5px;
@@ -2895,17 +2898,16 @@ async function openInventoryModal(steamId, displayName) {
       const active = c === "All" && !typeFilter || c === typeFilter;
       return `<button class="vsi-modal-chip${active ? " active" : ""}" data-cat="${c === "All" ? "" : escapeHtml(c)}">${c}</button>`;
     }).join("");
-    const rarityChips = rarities.length <= 1 ? "" : [["", "All"]].concat(rarities.map((h) => [h, RARITY_TIERS[h]?.name ?? "\u2605"])).map(([hex, label]) => {
-      const active = !hex && !rarityFilter || hex === rarityFilter;
-      const tint = hex ? ` style="color:#${hex}"` : "";
-      return `<button class="vsi-modal-chip vsi-modal-rchip${active ? " active" : ""}" data-rarity="${hex}"${tint}>${label}</button>`;
+    const rarityChips = rarities.length <= 1 ? "" : rarities.map((h) => {
+      const active = h === rarityFilter;
+      return `<button class="vsi-modal-rchip${active ? " active" : ""}" data-rarity="${h}" style="color:#${h}">${RARITY_TIERS[h]?.name ?? "\u2605"}</button>`;
     }).join("");
-    filtersEl.innerHTML = (typeChips ? `<div class="vsi-modal-chiprow">${typeChips}</div>` : "") + (rarityChips ? `<div class="vsi-modal-chiprow">${rarityChips}</div>` : "");
+    filtersEl.innerHTML = (typeChips ? `<div class="vsi-modal-chiprow">${typeChips}</div>` : "") + (rarityChips ? `<div class="vsi-modal-chiprow vsi-modal-rrow">${rarityChips}</div>` : "");
   };
   filtersEl.addEventListener("click", (e) => {
-    const chip = e.target?.closest(".vsi-modal-chip");
+    const chip = e.target?.closest(".vsi-modal-chip, .vsi-modal-rchip");
     if (!chip) return;
-    if (chip.dataset.rarity != null) rarityFilter = chip.dataset.rarity || null;
+    if (chip.dataset.rarity != null) rarityFilter = rarityFilter === chip.dataset.rarity ? null : chip.dataset.rarity;
     else typeFilter = chip.dataset.cat || null;
     filtersSig = "";
     renderFilters();
