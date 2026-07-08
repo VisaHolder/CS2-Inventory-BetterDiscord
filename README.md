@@ -1,12 +1,12 @@
 <div align="center">
 
-# Steam Inventory Value
+# CS2 Inventory — BetterDiscord
 
-**A BetterDiscord plugin that shows anyone's CS2 inventory value right on their Discord profile.**
+**Shows anyone's CS2 inventory value, floats & patterns right on their Discord profile.**
 
 Real floats & paint seeds · Doppler phase pricing · live prices in your currency · Trade Offer & Steam buttons · a shared cache so it loads instantly for everyone.
 
-[![Download](https://img.shields.io/badge/download-1a1a1a?style=for-the-badge&labelColor=2ea043)](https://github.com/VisaHolder/steam-inventory-value/releases/latest/download/SteamInventoryValue.plugin.js) &nbsp; [![Release](https://img.shields.io/github/v/release/VisaHolder/steam-inventory-value?style=for-the-badge&labelColor=2d333b&color=5865f2)](https://github.com/VisaHolder/steam-inventory-value/releases/latest) &nbsp; [![License](https://img.shields.io/badge/license-MIT-1a1a1a?style=for-the-badge&labelColor=2d333b)](LICENSE)
+[![Download](https://img.shields.io/badge/download-1a1a1a?style=for-the-badge&labelColor=2ea043)](https://github.com/VisaHolder/cs2-inventory-betterdiscord/releases/latest/download/SteamInventoryValue.plugin.js) &nbsp; [![Release](https://img.shields.io/github/v/release/VisaHolder/cs2-inventory-betterdiscord?style=for-the-badge&labelColor=2d333b&color=5865f2)](https://github.com/VisaHolder/cs2-inventory-betterdiscord/releases/latest) &nbsp; [![License](https://img.shields.io/badge/license-MIT-1a1a1a?style=for-the-badge&labelColor=2d333b)](LICENSE)
 
 <br>
 
@@ -23,7 +23,7 @@ Real floats & paint seeds · Doppler phase pricing · live prices in your curren
 ## Install (2 minutes)
 
 1. **Get BetterDiscord** (skip if you have it) — https://betterdiscord.app
-2. **Download** [`SteamInventoryValue.plugin.js`](https://github.com/VisaHolder/steam-inventory-value/releases/latest/download/SteamInventoryValue.plugin.js)
+2. **Download** [`SteamInventoryValue.plugin.js`](https://github.com/VisaHolder/cs2-inventory-betterdiscord/releases/latest/download/SteamInventoryValue.plugin.js)
 3. In Discord: **Settings → Plugins → Open Plugins Folder** — drop the file in
 4. Back in **Settings → Plugins**, turn **SteamInventoryValue** on
 

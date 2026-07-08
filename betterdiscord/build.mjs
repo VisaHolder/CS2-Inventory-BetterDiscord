@@ -5,8 +5,8 @@ const META = `/**
  * @author VisaHolder
  * @description CS2 inventory value on Discord profile popouts — Doppler/Gamma phase pricing (CSFloat), FX-converted prices, and Trade Offer / Steam buttons.
  * @version 1.5.3
- * @source https://github.com/VisaHolder/steam-inventory-value
- * @website https://github.com/VisaHolder/steam-inventory-value
+ * @source https://github.com/VisaHolder/cs2-inventory-betterdiscord
+ * @website https://github.com/VisaHolder/cs2-inventory-betterdiscord
  */
 `;
 

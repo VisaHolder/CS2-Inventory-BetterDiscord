@@ -1969,7 +1969,7 @@ function stopBackgroundRefresh() {
 // ── Self-updater ────────────────────────────────────────────────────────────────
 // Checks the built plugin committed on `main` for a newer @version, and (on confirm) writes it over
 // the local file — BetterDiscord's file watcher then reloads the plugin. No manual re-download.
-const UPDATE_URL = "https://raw.githubusercontent.com/VisaHolder/steam-inventory-value/main/betterdiscord/SteamInventoryValue.plugin.js";
+const UPDATE_URL = "https://raw.githubusercontent.com/VisaHolder/cs2-inventory-betterdiscord/main/betterdiscord/SteamInventoryValue.plugin.js";
 function compareVersions(a: string, b: string): number {
     const pa = a.split(".").map(n => parseInt(n, 10) || 0);
     const pb = b.split(".").map(n => parseInt(n, 10) || 0);
@@ -2664,7 +2664,7 @@ function prettyName(id: string): string {
 
 // "Made by reap" credit block pinned above the settings.
 const DONATE_URL = "https://steamcommunity.com/tradeoffer/new/?partner=1149562692&token=smsukaox";
-const GITHUB_URL = "https://github.com/VisaHolder/steam-inventory-value";
+const GITHUB_URL = "https://github.com/VisaHolder/cs2-inventory-betterdiscord";
 const DISCORD_HANDLE = "reap.";
 function buildAboutSection(): HTMLElement {
     const el = document.createElement("div");

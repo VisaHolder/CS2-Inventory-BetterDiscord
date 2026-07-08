@@ -10,7 +10,7 @@ See anyone's CS2 inventory value right on their Discord profile — real Doppler
 Download and run the installer — https://betterdiscord.app
 
 **2. Download the plugin**
-Grab `SteamInventoryValue.plugin.js` from the [latest release](https://github.com/VisaHolder/steam-inventory-value/releases/latest).
+Grab `SteamInventoryValue.plugin.js` from the [latest release](https://github.com/VisaHolder/cs2-inventory-betterdiscord/releases/latest).
 
 **3. Drop it in your plugins folder**
 In Discord: **Settings** (bottom-left) → scroll to **Plugins** → click **Open Plugins Folder** → drag the file in.

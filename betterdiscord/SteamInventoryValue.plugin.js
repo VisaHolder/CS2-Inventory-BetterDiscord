@@ -3,8 +3,8 @@
  * @author VisaHolder
  * @description CS2 inventory value on Discord profile popouts — Doppler/Gamma phase pricing (CSFloat), FX-converted prices, and Trade Offer / Steam buttons.
  * @version 1.5.3
- * @source https://github.com/VisaHolder/steam-inventory-value
- * @website https://github.com/VisaHolder/steam-inventory-value
+ * @source https://github.com/VisaHolder/cs2-inventory-betterdiscord
+ * @website https://github.com/VisaHolder/cs2-inventory-betterdiscord
  */
 
 
@@ -2076,7 +2076,7 @@ function stopBackgroundRefresh() {
     bgSeedTimer = null;
   }
 }
-var UPDATE_URL = "https://raw.githubusercontent.com/VisaHolder/steam-inventory-value/main/betterdiscord/SteamInventoryValue.plugin.js";
+var UPDATE_URL = "https://raw.githubusercontent.com/VisaHolder/cs2-inventory-betterdiscord/main/betterdiscord/SteamInventoryValue.plugin.js";
 function compareVersions(a, b) {
   const pa = a.split(".").map((n) => parseInt(n, 10) || 0);
   const pb = b.split(".").map((n) => parseInt(n, 10) || 0);
@@ -2708,7 +2708,7 @@ function prettyName(id) {
   return id.replace(/([A-Z])/g, " $1").replace(/^./, (c) => c.toUpperCase()).trim();
 }
 var DONATE_URL = "https://steamcommunity.com/tradeoffer/new/?partner=1149562692&token=smsukaox";
-var GITHUB_URL = "https://github.com/VisaHolder/steam-inventory-value";
+var GITHUB_URL = "https://github.com/VisaHolder/cs2-inventory-betterdiscord";
 var DISCORD_HANDLE = "reap.";
 function buildAboutSection() {
   const el = document.createElement("div");
