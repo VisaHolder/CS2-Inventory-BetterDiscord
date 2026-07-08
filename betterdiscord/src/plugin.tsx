@@ -227,12 +227,6 @@ const SETTINGS_SCHEMA: Record<string, any> = {
         default: "",
         placeholder: "CSFloat API key",
     },
-    steamWebApiToken: {
-        type: OptionType.STRING,
-        description: "Optional Steam web token — unlocks the real float + paint seed on every skin in YOUR OWN inventory's breakdown. Get it (logged into Steam) from steamcommunity.com/pointssummary/ajaxgetasyncconfig and paste the webapi_token value. It's read-only, works only for your own inventory, and expires about every 24h — re-paste when floats stop showing. Steam gives no way to read other people's floats, so this is own-inventory only.",
-        default: "",
-        placeholder: "webapi_token (eyJ0eXAiOi...)",
-    },
     includeStickerValue: {
         type: OptionType.BOOLEAN,
         description: "Add applied-sticker value on top of each skin. Off by default — applied stickers rarely resell for much unless they're very rare, so counting full sticker value overstates what an inventory is actually worth. Turn on only if you want the theoretical sticker-book number.",
@@ -544,8 +538,6 @@ function parseStickers(desc: any): string[] {
 interface PricingOptions {
     source: string;
     useLiveFallback: boolean;
-    // Per-asset float/paint-seed (own inventory only, via the Steam webapi_token). Keyed by assetid.
-    assetProps?: Map<string, { float?: number; seed?: number }>;
     onProgress?: (done: number, total: number) => void;
     // When set, the slow live-Steam fallback runs in the background and calls this with the
     // updated result once it finishes, so loadInventory can return the CSFloat total instantly.
@@ -614,54 +606,6 @@ async function getCsfloatPhasePrice(marketHashName: string, paintIndex: number):
     }
 }
 
-// ── Own-inventory float + paint seed (Steam web API) ────────────────────────────
-// The public inventory JSON hides per-item float behind a `propid` placeholder, but the
-// authenticated IEconService/GetInventoryItemsWithDescriptions endpoint returns it directly in
-// asset_properties (propertyid 2 = float/wear, 1 = paint seed). The webapi_token authenticates the
-// CALLER and only ever returns the token OWNER's inventory — so this yields YOUR floats only.
-function base64UrlDecode(s: string): string {
-    s = s.replace(/-/g, "+").replace(/_/g, "/");
-    while (s.length % 4) s += "=";
-    return atob(s);
-}
-function tokenSteamId(token: string): string | null {
-    try {
-        const payload = JSON.parse(base64UrlDecode(token.split(".")[1] || ""));
-        return typeof payload?.sub === "string" ? payload.sub : null;
-    } catch { return null; }
-}
-async function fetchOwnAssetProps(steamId: string): Promise<Map<string, { float?: number; seed?: number }> | null> {
-    const token = (settings.store.steamWebApiToken || "").trim();
-    if (!token || tokenSteamId(token) !== steamId) return null; // token only unlocks its own owner's inventory
-    const out = new Map<string, { float?: number; seed?: number }>();
-    const base = "https://api.steampowered.com/IEconService/GetInventoryItemsWithDescriptions/v1/";
-    let start: string | undefined;
-    let pages = 0;
-    try {
-        do {
-            const p = new URLSearchParams({ access_token: token, steamid: steamId, appid: "730", contextid: "2", get_asset_properties: "true", count: "2000" });
-            if (start) p.set("start_assetid", start);
-            const resp = (await fetchJson(`${base}?${p.toString()}`))?.response;
-            if (!resp) break;
-            for (const w of (resp.asset_properties ?? [])) {
-                let fl: number | undefined, sd: number | undefined;
-                for (const pr of (w.asset_properties ?? [])) {
-                    if (pr.float_value != null) { const v = Number(pr.float_value); if (v >= 0 && v <= 1) fl = v; }
-                    else if (Number(pr.propertyid) === 1 && pr.int_value != null) { const v = Number(pr.int_value); if (v >= 0 && v <= 1000) sd = v; }
-                }
-                if (fl != null || sd != null) out.set(String(w.assetid), { float: fl, seed: sd });
-            }
-            start = resp.more_items ? String(resp.last_assetid) : undefined;
-            pages++;
-            if (start) await sleep(400);
-        } while (start && pages < 8);
-    } catch (e) {
-        console.warn("[VSI] float fetch failed — webapi_token may be expired (re-paste it)", e);
-        return out.size ? out : null;
-    }
-    return out;
-}
-
 async function loadInventory(steamId: string, opts: PricingOptions): Promise<InventoryResult> {
     const empty = (isPriv: boolean): InventoryResult => ({
         total: 0, priced: 0, count: 0, marketableCount: 0, uniqueNames: 0, isPrivate: isPriv, topItems: [], allItems: [], owned: {}, stickerTotal: 0, unpriced: [], skippedNonMarketable: 0,
@@ -675,6 +619,7 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
     const base = `https://steamcommunity.com/inventory/${steamId}/730/2?l=english&count=2000`;
     const assets: any[] = [];
     const descriptions: any[] = [];
+    const assetProps: any[] = []; // per-asset float/seed — Steam returns these publicly for ANY inventory
     const seenDesc = new Set<string>();
     let startAssetId: string | undefined;
     let pages = 0;
@@ -687,6 +632,7 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
                 break;
             }
             assets.push(...page.assets);
+            if (Array.isArray(page.asset_properties)) assetProps.push(...page.asset_properties);
             for (const d of page.descriptions) {
                 const k = `${d.classid}_${d.instanceid}`;
                 if (!seenDesc.has(k)) { seenDesc.add(k); descriptions.push(d); }
@@ -701,6 +647,18 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
     }
     if (assets.length === 0) return empty(true);
     const inv = { assets, descriptions };
+
+    // Per-asset float (propertyid 2 "Wear Rating") + paint seed (propertyid 1 "Pattern Template"),
+    // straight from Steam's public inventory response — available for ANY public inventory, no auth.
+    const floatMap = new Map<string, { float?: number; seed?: number }>();
+    for (const w of assetProps) {
+        let fl: number | undefined, sd: number | undefined;
+        for (const p of (w.asset_properties ?? [])) {
+            if (Number(p.propertyid) === 2 && p.float_value != null) { const v = Number(p.float_value); if (v >= 0 && v <= 1) fl = v; }
+            else if (Number(p.propertyid) === 1 && p.int_value != null) { const v = Number(p.int_value); if (v >= 0 && v <= 1000) sd = v; }
+        }
+        if (fl != null || sd != null) floatMap.set(String(w.assetid), { float: fl, seed: sd });
+    }
 
     // Steam's `marketable` (0/1) tells us if the item can even be listed on the Market.
     // Medals, service coins, achievement badges, non-tradeable capsules etc. have marketable=0.
@@ -799,7 +757,7 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
             const sm = stickerByGroup.get(gk);
             if (sm) stickerTotal += sm.value * g.qty;
             // Per-item float/seed only make sense for a single copy — attach them to singleton groups.
-            const ap = (g.qty === 1 && opts.assetProps) ? opts.assetProps.get(g.assetids[0]) : undefined;
+            const ap = g.qty === 1 ? floatMap.get(g.assetids[0]) : undefined;
             perItem.push({ name: g.phase ? `${g.name} (${g.phase})` : g.name, price: p, qty: g.qty, icon: g.icon, stickerValue: sm?.value, stickerCount: sm?.count, rarity: g.rarity || undefined, hashName: g.name, float: ap?.float, seed: ap?.seed });
         }
         perItem.sort((a, b) => (b.price * b.qty) - (a.price * a.qty));
@@ -1705,9 +1663,7 @@ async function priceSteamId(steamId: string, name?: string, onBackgroundUpdate?:
         }
         : undefined;
 
-    // Own-inventory floats/seeds (no-op for foreign profiles or without a token).
-    const assetProps = await fetchOwnAssetProps(steamId).catch(() => null);
-    const inv = await loadInventory(steamId, { source, useLiveFallback, assetProps: assetProps ?? undefined, onUpdate });
+    const inv = await loadInventory(steamId, { source, useLiveFallback, onUpdate });
     if (inv.isPrivate) throw new Error("inventory-private");
     const snap = snapFrom(inv);
     const rk = await cachePushInventory(steamId, snap, name); // share to the read-through cache (best-effort)
@@ -2453,13 +2409,6 @@ function buildSettingsPanel(): any {
             // Share your trade URL to the cache the moment you set it, so other addon users
             // see a Trade button on your profile right away.
             if (id === "tradeUrl" || id === "useSharedCache" || id === "shareTradeUrl") cachePushTradeUrl().catch(() => { /* best-effort */ });
-            // Paste a webapi_token → immediately re-price your own inventory so floats/seeds populate.
-            if (id === "steamWebApiToken" && typeof value === "string" && value.trim()) {
-                const sid = tokenSteamId(value.trim());
-                if (sid) priceSteamId(sid)
-                    .then(() => { try { BD.UI?.showToast?.("Floats loaded — open your inventory breakdown.", { type: "success" }); } catch { /* */ } })
-                    .catch(() => { try { BD.UI?.showToast?.("Couldn't load floats — token may be invalid or expired.", { type: "error" }); } catch { /* */ } });
-            }
             if (id === "resetHistory" && value === true) {
                 const n = clearAllHistory();
                 (settings.store as any).resetHistory = false;
