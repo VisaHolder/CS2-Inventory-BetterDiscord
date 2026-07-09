@@ -18,7 +18,7 @@ const { Webpack } = BD;
 // Resolved defensively: a webpack lookup throwing (some Discord modules have
 // getters that throw when a filter touches them) must never stop the plugin
 // from loading. Anything that fails stays null and its feature degrades.
-let UserStore: any, UserProfileStore: any, SelectedGuildStore: any, SelectedChannelStore: any, RestAPI: any, MessageActions: any, ComponentDispatch: any;
+let UserStore: any, UserProfileStore: any, SelectedGuildStore: any, SelectedChannelStore: any, RestAPI: any, MessageActions: any;
 try { UserStore = Webpack.getStore("UserStore"); } catch { /* */ }
 try { UserProfileStore = Webpack.getStore("UserProfileStore"); } catch { /* */ }
 try { SelectedGuildStore = Webpack.getStore("SelectedGuildStore"); } catch { /* */ }
@@ -30,17 +30,6 @@ try {
 try {
     MessageActions = (Webpack.getByKeys && Webpack.getByKeys("sendMessage", "editMessage"))
         || Webpack.getModule((m: any) => typeof m?.sendMessage === "function" && typeof m?.editMessage === "function");
-} catch { /* */ }
-try {
-    // Used to insert text into the message box (the "Post to chat" row) so the user reviews & sends.
-    // The dispatcher exposes dispatchToLastSubscribed; it lives either as a top-level export or under
-    // a `.ComponentDispatch` key depending on the build — try both, plus a broad module scan.
-    const pick = (o: any) => (o && typeof o.dispatchToLastSubscribed === "function") ? o : (o?.ComponentDispatch && typeof o.ComponentDispatch.dispatchToLastSubscribed === "function" ? o.ComponentDispatch : null);
-    ComponentDispatch =
-        (Webpack.getByKeys && pick(Webpack.getByKeys("dispatchToLastSubscribed")))
-        || (Webpack.getByKeys && pick(Webpack.getByKeys("ComponentDispatch")))
-        || pick(Webpack.getModule((m: any) => typeof m?.dispatchToLastSubscribed === "function"))
-        || pick(Webpack.getModule((m: any) => m?.ComponentDispatch?.dispatchToLastSubscribed));
 } catch { /* */ }
 
 // ── External HTTP. BdApi.Net.fetch is CSP-free (like Vencord's native helper),
@@ -104,6 +93,10 @@ function setCardEnabled(userId: string, on: boolean) {
 
 interface SteamProfile { steamId: string; persona?: string; avatar?: string }
 
+// Trade-URL `partner` (32-bit account id) → SteamID64. Single source of truth for the offset so
+// resolveSteamRef and steamIdFromTradeUrl can't drift.
+const partnerToSteam64 = (partner: string | number): string => (76561197960265728n + BigInt(partner)).toString();
+
 async function resolveSteamRef(input: string): Promise<SteamProfile | null> {
     let raw = input.trim().replace(/^@+/, "").replace(/\/+$/, "");
     // Strip protocol garbage so downstream regex is simpler
@@ -117,7 +110,7 @@ async function resolveSteamRef(input: string): Promise<SteamProfile | null> {
     // Trade URL: partner param → SteamID64
     if (!steamId) {
         const m = raw.match(/[?&]partner=(\d+)/);
-        if (m) steamId = (76561197960265728n + BigInt(m[1])).toString();
+        if (m) steamId = partnerToSteam64(m[1]);
     }
 
     // Profile URL: /profiles/76561...
@@ -542,7 +535,12 @@ async function fetchSteamMarketPrice(marketHashName: string, currency: number): 
     const url = `https://steamcommunity.com/market/priceoverview/?country=US&currency=${currency}&appid=730&market_hash_name=${encodeURIComponent(marketHashName)}`;
     try {
         const data = await fetchJson(url);
-        if (!data?.success) { priceMemo.set(key, { price: 0, ts: Date.now() }); return 0; }
+        if (!data?.success) {
+            // success:false covers soft throttles too, not just nonexistent items — a long-lived 0
+            // would pin the item unpriced for up to an hour. Short negative cache (5 min) instead.
+            priceMemo.set(key, { price: 0, ts: Date.now() - ttl + 5 * 60_000 });
+            return 0;
+        }
         const raw = data.lowest_price ?? data.median_price ?? "";
         const price = parseSteamPrice(raw);
         priceMemo.set(key, { price, ts: Date.now() });
@@ -617,12 +615,11 @@ function parseTradeHold(desc: any): { tradable: boolean; tradableAfter?: number 
     }
     return { tradable, tradableAfter };
 }
-// Short "6d" / "3h" until a timestamp (empty once elapsed).
+// Short "6d" / "3h" until a timestamp (empty once elapsed). Sub-day holds show hours.
 function untilLabel(ts: number): string {
     const ms = ts - Date.now();
     if (ms <= 0) return "";
-    const days = Math.ceil(ms / 86_400_000);
-    return days >= 1 ? `${days}d` : `${Math.ceil(ms / 3_600_000)}h`;
+    return ms >= 86_400_000 ? `${Math.ceil(ms / 86_400_000)}d` : `${Math.ceil(ms / 3_600_000)}h`;
 }
 
 interface PricingOptions {
@@ -729,7 +726,7 @@ function floatFlagFor(rawName: string, float: number | undefined, paintIndexOver
 // CSFloat authenticated phase-specific lowest price (USD → user currency). Cached like the bulk feed.
 // We filter by paint_index (the exact phase) — sorting the generic name by price would only ever
 // surface the cheapest phases, never the user's Phase 2 / Ruby / Sapphire / Black Pearl.
-const phasePriceCache = new Map<string, { price: number; ts: number }>();
+const phasePriceCache = new Map<string, { price: number | null; ts: number }>();
 async function getCsfloatPhasePrice(marketHashName: string, paintIndex: number): Promise<number | null> {
     const apiKey = (settings.store.csfloatApiKey || "").trim();
     if (!apiKey) return null;
@@ -737,21 +734,29 @@ async function getCsfloatPhasePrice(marketHashName: string, paintIndex: number):
     const cacheKey = `${marketHashName}::${paintIndex}::${cur}`;
     const ttl = (settings.store.priceCacheMinutes || 60) * 60_000;
     const hit = phasePriceCache.get(cacheKey);
-    if (hit && Date.now() - hit.ts < ttl) return hit.price;
+    if (hit && Date.now() - hit.ts < ttl) return hit.price; // cache hit — no fetch, no sleep
     try {
         const url = `https://csfloat.com/api/v1/listings?sort_by=lowest_price&limit=1&market_hash_name=${encodeURIComponent(marketHashName)}&paint_index=${paintIndex}`;
         const resp: any = await fetchJson(url, { headers: { Authorization: apiKey } });
         const list: any[] = Array.isArray(resp) ? resp : (resp?.data ?? []);
         const cents = list[0]?.price;
-        if (typeof cents !== "number" || cents <= 0) return null;
+        if (typeof cents !== "number" || cents <= 0) {
+            // Negative-cache "no listings" too — otherwise every re-price re-hits (and re-sleeps for)
+            // the same empty phase, which for a doppler-heavy inventory adds seconds per refresh.
+            phasePriceCache.set(cacheKey, { price: null, ts: Date.now() });
+            await sleep(350); // gentle on CSFloat's API — only after an actual request
+            return null;
+        }
         let price = cents / 100; // CSFloat prices are USD cents
         const targetCode = currencyCode(cur);
         if (targetCode !== "USD") { const r = await getUsdRate(targetCode); if (r > 0) price *= r; }
         phasePriceCache.set(cacheKey, { price, ts: Date.now() });
+        await sleep(350); // gentle on CSFloat's API — only after an actual request
         return price;
     } catch (e) {
         console.warn("[VSI] CSFloat phase price failed for", marketHashName, paintIndex, e);
-        return null;
+        await sleep(350);
+        return null; // transient failure — deliberately NOT cached, next run retries
     }
 }
 
@@ -779,6 +784,8 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
     const descriptions: any[] = [];
     const assetProps: any[] = []; // per-asset float/seed/nametag/inspect — returned for ANY public inventory
     const seenDesc = new Set<string>();
+    const seenAsset = new Set<string>(); // dedup assets across pages (a bad cursor must never double-count)
+    let sawEmptySuccess = false; // Steam answered OK with total_inventory_count 0 → public but EMPTY, not private
 
     // Own inventory + a valid webapi_token → the AUTHENTICATED endpoint, which returns the FULL
     // inventory including trade-held / restricted items (gloves, knives on a hold) that the public
@@ -794,20 +801,38 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
         do {
             const raw: any = await fetchJson(urlFor(auth, start));
             const page: any = auth ? (raw?.response ?? {}) : raw;
-            if (!page?.assets || !page?.descriptions) break; // blocked / empty page
-            assets.push(...page.assets);
+            if (!page?.assets || !page?.descriptions) {
+                // A well-formed answer with a zero count is a public-but-EMPTY inventory — remember
+                // that so it isn't misreported as "private" below.
+                if (page && Number(page.total_inventory_count) === 0) sawEmptySuccess = true;
+                break;
+            }
+            for (const a of page.assets) {
+                if (!seenAsset.has(a.assetid)) { seenAsset.add(a.assetid); assets.push(a); }
+            }
             if (Array.isArray(page.asset_properties)) assetProps.push(...page.asset_properties);
             for (const d of page.descriptions) {
                 const k = `${d.classid}_${d.instanceid}`;
                 if (!seenDesc.has(k)) { seenDesc.add(k); descriptions.push(d); }
             }
-            start = page.more_items ? String(page.last_assetid) : undefined;
+            // A more_items page without a cursor would loop back to page 1 (start = "undefined") —
+            // stop instead; the asset dedup above is the second line of defense.
+            start = (page.more_items && page.last_assetid) ? String(page.last_assetid) : undefined;
             pages++;
             if (start) await sleep(auth ? 300 : 600); // be gentle — Steam rate-limits inventory requests
         } while (start && pages < 8);
     };
 
-    if (useAuth) { try { await paginate(true); } catch { /* token expired/invalid → fall back to public */ } }
+    if (useAuth) {
+        try { await paginate(true); }
+        catch {
+            // Token expired/invalid OR a mid-run failure. A PARTIAL authed inventory must not be
+            // priced as complete (it would poison snapshots, the diff and the shared cache) — reset
+            // everything and let the public endpoint start clean.
+            assets.length = 0; descriptions.length = 0; assetProps.length = 0;
+            seenDesc.clear(); seenAsset.clear(); sawEmptySuccess = false;
+        }
+    }
     if (assets.length === 0) {
         try { await paginate(false); }
         catch (e: any) {
@@ -815,7 +840,9 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
             if (assets.length === 0) throw e; // nothing fetched → surface the error; else price partial
         }
     }
-    if (assets.length === 0) return empty(true);
+    // No assets + a confirmed zero count = a real, public, empty inventory (worth ~$0) — only an
+    // unexplained empty answer means private/blocked.
+    if (assets.length === 0) return empty(!sawEmptySuccess);
     const inv = { assets, descriptions };
 
     // Per-asset float (propertyid 2 "Wear Rating"), paint seed (1 "Pattern Template") and the custom
@@ -877,7 +904,9 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
         marketableCount++;
         owned.set(meta.name, (owned.get(meta.name) ?? 0) + 1);
         const stickerSig = meta.stickers.length ? meta.stickers.slice().sort().join("|") : "";
-        const gk = `${meta.name}::${meta.phase ?? ""}::${stickerSig}`;
+        // Held and unheld copies split into separate rows — the hold flag is per-description, so a
+        // mixed stack would otherwise show "locked" on all copies (or hide a real hold).
+        const gk = `${meta.name}::${meta.phase ?? ""}::${stickerSig}::${meta.tradable ? "" : "h"}`;
         const g = groups.get(gk);
         if (g) { g.qty++; g.assetids.push(a.assetid); }
         else groups.set(gk, { name: meta.name, phase: meta.phase, paintIndex: meta.paintIndex, qty: 1, icon: meta.icon, stickers: meta.stickers, rarity: meta.rarity, assetids: [a.assetid], catType: meta.catType, tradable: meta.tradable, tradableAfter: meta.tradableAfter });
@@ -908,8 +937,7 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
     for (const [gk, g] of groups) {
         let base: number | null = null;
         if (g.phase && g.paintIndex != null && hasKey) {
-            base = await getCsfloatPhasePrice(g.name, g.paintIndex);
-            await sleep(350); // gentle on CSFloat's API
+            base = await getCsfloatPhasePrice(g.name, g.paintIndex); // rate-limit sleep lives inside (skipped on cache hits)
         }
         if (base == null) base = priceByName.get(g.name) ?? null;
         if (base == null) continue; // unpriced base → leave for the live fallback
@@ -951,16 +979,21 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
     //    returning the CSFloat-priced total instantly. Without a callback (or for the live_steam
     //    source, where there is no fast result) we run it inline. ──
     const shouldRunLive = opts.source === "live_steam" || (opts.useLiveFallback && misses.length > 0);
+    // Capture the currency NOW — the background fallback can outlive a settings change, and mixing
+    // two currencies inside one total (bulk prices in the old, live prices in the new) corrupts the
+    // snapshot and the USD value pushed to the shared cache.
+    const liveCurrency = settings.store.marketCurrency || 1;
     const runFallback = async () => {
-        const currency = settings.store.marketCurrency || 1;
         const delay = Math.max(500, settings.store.requestDelayMs || 1600);
         for (let i = 0; i < misses.length; i++) {
             const name = misses[i];
             try {
-                const p = await fetchSteamMarketPrice(name, currency);
+                const p = await fetchSteamMarketPrice(name, liveCurrency);
                 if (p > 0) {
                     priceByName.set(name, p);
-                    for (const [gk, g] of groups) if (!priceByGroup.has(gk) && !g.phase && g.name === name) priceByGroup.set(gk, p);
+                    // No `!g.phase` filter: a Doppler whose phase lookup failed should still take the
+                    // generic live price rather than staying unpriced forever.
+                    for (const [gk, g] of groups) if (!priceByGroup.has(gk) && g.name === name) priceByGroup.set(gk, p);
                 }
             } catch (e: any) {
                 // Steam 429s aggressively. Once rate-limited, every further request also 429s,
@@ -1023,6 +1056,7 @@ interface Snapshot {
     tracked?: number; // how many inventories the cache is tracking
     series?: number[]; // shared value history (display currency, oldest→newest) — from the cache,
                        // used to draw a sparkline on a first/foreign view before local history exists
+    ts0?: number;    // coalesce-window anchor: ts of the FIRST push this point absorbed (see pushSnapshot)
 }
 
 const snapKey = (steamId: string) => `vsi.snap.${steamId}`;
@@ -1043,8 +1077,20 @@ async function pushSnapshot(steamId: string, snap: Snapshot) {
     // into a sawtooth. Replace the newest point when it's within the window (same currency) so the
     // sparkline stays a real time-series, not a refresh counter.
     const prev = list[0];
-    if (prev && (snap.ts - prev.ts) < SNAP_COALESCE_MS && (prev.currency || 1) === (snap.currency || 1)) list[0] = snap;
-    else list.unshift(snap);
+    // Never let an OLDER snapshot clobber a newer local point (the shared-cache fallback carries the
+    // worker's ts, which can lag the last local price by up to 25 min).
+    if (prev && snap.ts < prev.ts) return;
+    // The window is anchored at the FIRST push it absorbed (ts0), not the latest — otherwise a user
+    // refreshing every <20 min slides the window forward forever and no second point ever accretes,
+    // starving the delta chip and sparkline.
+    const anchor = prev ? (prev.ts0 ?? prev.ts) : 0;
+    if (prev && (snap.ts - anchor) < SNAP_COALESCE_MS && (prev.currency || 1) === (snap.currency || 1)) {
+        snap.ts0 = anchor;
+        list[0] = snap;
+    } else {
+        snap.ts0 = snap.ts;
+        list.unshift(snap);
+    }
     // Keep ~10 days at the 6h background cadence, so even a 7-day delta window has a data point.
     await DataStore.set(snapKey(steamId), list.slice(0, 40));
 }
@@ -1266,12 +1312,6 @@ function computeDelta(currentTotal: number, snaps: Snapshot[], minAgeMs: number)
     return { delta: currentTotal - prev.total, ago: humanAgo(now - prev.ts) };
 }
 
-function formatDeltaText(delta: number, ago: string, cur: number): string {
-    const sign = delta >= 0 ? "+" : "";
-    const emoji = delta > 0 ? "📈" : delta < 0 ? "📉" : "➖";
-    return `${emoji} ${sign}${fmt(delta, cur).replace(currencySymbol(cur), currencySymbol(cur))} since ${ago}`;
-}
-
 // ─── Trade button injection ───────────────────────────────────────────────────
 
 const STEAM_ICON_SVG = "<svg viewBox=\"0 0 24 24\" width=\"15\" height=\"15\" fill=\"currentColor\" aria-hidden=\"true\"><path d=\"M11.98 2C6.7 2 2.36 6.03 2 11.13l5.38 2.22a2.86 2.86 0 0 1 1.6-.48h.15l2.4-3.47v-.05a3.83 3.83 0 1 1 3.83 3.83h-.09l-3.42 2.44v.13a2.87 2.87 0 0 1-5.42 1.3L2.5 15.5A9.99 9.99 0 0 0 22 12c0-5.52-4.48-10-10.02-10ZM8.79 17.16l-1.22-.5a2.16 2.16 0 0 0 1.15 1.13c1.09.45 2.35-.06 2.8-1.16.22-.53.22-1.11 0-1.64a2.15 2.15 0 0 0-1.14-1.16 2.14 2.14 0 0 0-1.64.01l1.26.52a1.59 1.59 0 1 1-1.21 2.94v-.14Zm10.02-7.6a2.55 2.55 0 0 1-5.11 0 2.55 2.55 0 0 1 5.11 0Zm-4.47 0a1.92 1.92 0 1 0 3.83 0 1.92 1.92 0 0 0-3.83 0Z\"/></svg>";
@@ -1315,7 +1355,7 @@ function steamIdFromTradeUrl(tradeUrl: string): string | null {
     try {
         const partner = new URL(tradeUrl).searchParams.get("partner");
         if (!partner || !/^\d+$/.test(partner)) return null;
-        return (76561197960265728n + BigInt(partner)).toString();
+        return partnerToSteam64(partner);
     } catch {
         return null;
     }
@@ -1591,10 +1631,6 @@ const BUTTON_CSS = `
 .vsi-trade-btn svg { transition: transform .15s ease; }
 .vsi-trade-btn:hover svg { transform: scale(1.06); }
 
-.vsi-trade-main { flex: 5 1 0; }
-.vsi-trade-profile { flex: 3 1 0; }
-.vsi-trade-btn:hover { transform: translateY(-1px); }
-.vsi-trade-btn:active { transform: translateY(0); filter: brightness(.92); }
 .vsi-trade-btn svg { flex-shrink: 0; }
 
 .vsi-trade-btn.blurple { background: #5865F2; color: #fff; box-shadow: 0 2px 10px rgba(88,101,242,.35); }
@@ -1872,7 +1908,9 @@ function buildButton(shownUserId: string, isOwn: boolean, wantTradeRow: boolean,
             if (t?.closest?.(".vsi-watch")) {
                 e.stopPropagation();
                 e.preventDefault();
-                const sid = getSteamIdSync(shownUserId);
+                // Prefer the steamId stamped at render time — the sync store lookup misses for
+                // profiles resolved via REST, which would make the bell a silent no-op.
+                const sid = card.dataset.vsiSteamId || getSteamIdSync(shownUserId);
                 const snap = sid ? getSnapshotsSync(sid)[0] : null;
                 if (!sid || !snap) return;
                 const nm = UserStore?.getUser?.(shownUserId)?.username;
@@ -1910,10 +1948,14 @@ async function runInventoryForUser(shownUserId: string, onBackgroundUpdate?: () 
 // Prices a SteamID directly, persists the snapshot + full item list, shares to the cache, and
 // returns the result. `onBackgroundUpdate` (when given) runs the slow Steam fallback in the
 // background and fires once it lands. Used by the card, the modal, and the context menu.
-async function priceSteamId(steamId: string, name?: string, onBackgroundUpdate?: () => void, noLiveFallback = false): Promise<InventoryResult> {
-    const validSources = new Set(["csfloat", "skinport", "live_steam"]);
+// Single source of truth for validating the configured price source — the card and the slash
+// commands must never price from different feeds because one of two copies drifted.
+const resolvedPriceSource = (): string => {
     const stored = settings.store.priceSource as string;
-    const source = validSources.has(stored) ? stored : "csfloat";
+    return new Set(["csfloat", "skinport", "live_steam"]).has(stored) ? stored : "csfloat";
+};
+async function priceSteamId(steamId: string, name?: string, onBackgroundUpdate?: () => void, noLiveFallback = false): Promise<InventoryResult> {
+    const source = resolvedPriceSource();
     // The scheduled background refresh skips the slow per-item Steam fallback to stay light.
     const useLiveFallback = !noLiveFallback && !!settings.store.useLiveSteamFallback;
     const cur = settings.store.marketCurrency || 1;
@@ -2062,12 +2104,20 @@ function sparklineSvg(values: number[], cur = 1): string {
 }
 
 // If auto-refresh is on and this snapshot is stale, silently re-price in the background and let
-// the refresh update the card in place. No loop: a successful re-price stamps a fresh ts.
+// the refresh update the card in place. A successful re-price stamps a fresh ts; a FAILED one
+// doesn't — and refreshCard's completion re-renders the card, which calls back in here. Without a
+// cooldown that's an infinite refresh loop while Steam/CSFloat are down, so failed attempts are
+// rate-limited per profile.
+const autoRefreshAttempt = new Map<string, number>();
+const AUTO_REFRESH_RETRY_MS = 10 * 60_000;
 function maybeAutoRefresh(card: HTMLElement, latest: Snapshot, shownUserId: string, isOwn: boolean) {
     if (!settings.store.autoRefreshStale || card.classList.contains("loading")) return;
     // 0 = "never mark stale" everywhere → also means never auto-refresh (nothing is stale).
     const staleH = settings.store.snapshotStalenessHours ?? 24;
     if (staleH <= 0 || Date.now() - latest.ts <= staleH * 3_600_000) return;
+    const last = autoRefreshAttempt.get(shownUserId) ?? 0;
+    if (Date.now() - last < AUTO_REFRESH_RETRY_MS) return; // recent attempt (likely failed) — back off
+    autoRefreshAttempt.set(shownUserId, Date.now());
     refreshCard(card, shownUserId, isOwn).catch(() => { /* */ });
 }
 
@@ -2098,7 +2148,10 @@ function checkWatchAlerts(): void {
     for (const steamId of ids) {
         const e = w[steamId];
         const snap = getSnapshotsSync(steamId)[0];
-        if (!snap || (snap.currency || 1) !== e.currency) continue;
+        if (!snap) continue;
+        // Currency changed since the baseline was set → the old base is in a different unit and can
+        // never legitimately compare again. Re-baseline in the new currency instead of going silent.
+        if ((snap.currency || 1) !== e.currency) { e.currency = snap.currency || 1; e.base = snap.total; changed = true; continue; }
         if (!e.base) { e.base = snap.total; changed = true; continue; }
         if (Math.abs(snap.total - e.base) / e.base >= thr) {
             const up = snap.total > e.base;
@@ -2113,7 +2166,7 @@ function checkWatchAlerts(): void {
 
 // ─── Scheduled background refresh ───────────────────────────────────────────────
 // Re-prices recently-viewed profiles on a timer so every tracked card has a real data point at the
-// delta window (a true, consistent 24h change). Deliberately light: it checks every 30 min and
+// delta window (a true, consistent 24h change). Deliberately light: it checks every 15 min and
 // prices only a few STALE profiles per check (spaced out), so at steady state each profile is
 // re-priced ~every 6h with no continuous CPU use. Profiles you haven't viewed in a week age out.
 let bgTimer: ReturnType<typeof setInterval> | null = null;
@@ -2291,11 +2344,13 @@ function renderPricedCard(card: HTMLElement, latest: Snapshot, history: Snapshot
         const d = computeDelta(latest.total, sameCurHistory, minAgeMin * 60_000);
         if (d) {
             const cls = d.delta > 0 ? "up" : d.delta < 0 ? "down" : "";
-            const sign = d.delta >= 0 ? "+" : "";
+            // Sign prefixes the formatted MAGNITUDE — formatting the raw negative would put the
+            // minus after the currency symbol ("C$-0.88" instead of "−C$0.88").
+            const sign = d.delta > 0 ? "+" : d.delta < 0 ? "−" : "±";
             // Fixed window label (same on every card) so the timeframe is consistent across profiles;
             // the nearest snapshot's true age is in the tooltip for anyone who wants the exact basis.
             const win = windowLabel(minAgeMin);
-            deltaHtml = `<span class="vsi-delta ${cls}" title="change over the last ${win} (nearest snapshot ${d.ago})">${sign}${fmt(d.delta, cur)} · ${win}</span>`;
+            deltaHtml = `<span class="vsi-delta ${cls}" title="change over the last ${win} (nearest snapshot ${d.ago})">${sign}${fmt(Math.abs(d.delta), cur)} · ${win}</span>`;
         }
     }
 
@@ -2337,6 +2392,9 @@ function renderPricedCard(card: HTMLElement, latest: Snapshot, history: Snapshot
         sparkHtml = sparklineSvg(series, cur);
     }
 
+    // Stamp the resolved SteamID on the card: the bell's click handler runs in a context where the
+    // sync store lookup can miss (this steamId may have been resolved via REST), so it reads this.
+    if (steamId) card.dataset.vsiSteamId = steamId;
     const watched = steamId ? isWatched(steamId) : false;
     const watchBtn = steamId
         ? `<span class="vsi-watch${watched ? " on" : ""}" title="${watched ? "Watching — you'll get a notice on big value moves. Click to stop." : "Watch this inventory — get a notice when its value moves past your threshold."}">${watched ? "🔔" : "🔕"}</span>`
@@ -2796,7 +2854,10 @@ function closeInventoryModal() {
 
 async function openInventoryModal(steamId: string, displayName: string) {
     closeInventoryModal(); // never stack two
-    const cur = settings.store.marketCurrency || 1;
+    // Display currency. May be overridden below by a stored snapshot's own currency — after a
+    // marketCurrency switch the persisted prices are still in the OLD currency, and labeling them
+    // with the new symbol would misstate every number.
+    let cur = settings.store.marketCurrency || 1;
 
     // Owner's trade URL (partner+token) — enables the "Create trade for this item" right-click action.
     // Only for a FOREIGN inventory (trading with yourself is pointless); resolved from the shared cache.
@@ -2851,7 +2912,10 @@ async function openInventoryModal(steamId: string, displayName: string) {
     const renderFilters = () => {
         const present = TYPE_ORDER.filter(c => items.some(i => i.catType === c));
         // Distinct rarities present, ordered low→high grade; a color-only chip for unknown/★ hues.
+        // Validate the hex here (same regex as rarityAccent) — these strings come from Steam's
+        // name_color and are interpolated into a style attribute, so only real hex may pass.
         const rarities = [...new Set(items.map(i => i.rarity).filter(Boolean) as string[])]
+            .filter(h => /^[0-9a-f]{3}([0-9a-f]{3})?$/i.test(h))
             .sort((a, b) => (RARITY_TIERS[a]?.ord ?? 99) - (RARITY_TIERS[b]?.ord ?? 99));
         const sig = present.join("|") + "::" + (typeFilter ?? "") + "::" + rarities.join("|") + "::" + (rarityFilter ?? "");
         if (sig === filtersSig) return;
@@ -2927,8 +2991,8 @@ async function openInventoryModal(steamId: string, displayName: string) {
                 i.seed != null && isPatternSkin(i.name) ? `<span class="vsi-modal-seed" title="paint seed / pattern">#${i.seed}</span>` : "",
             ].filter(Boolean).join("");
             return `
-            <a class="vsi-modal-row" href="${itemHref(i, steamId)}" target="_blank" rel="noopener noreferrer" data-i="${idx}" title="${clickActionLabel(i)} · right-click for more"${rarityAccent(i.rarity)}>
-                ${i.icon ? `<img class="vsi-modal-thumb" src="${steamThumb(i.icon)}" loading="lazy" />` : "<div class=\"vsi-modal-thumb\"></div>"}
+            <a class="vsi-modal-row" href="${escapeHtml(itemHref(i, steamId))}" target="_blank" rel="noopener noreferrer" data-i="${idx}" title="${clickActionLabel(i)} · right-click for more"${rarityAccent(i.rarity)}>
+                ${i.icon ? `<img class="vsi-modal-thumb" src="${escapeHtml(steamThumb(i.icon))}" loading="lazy" />` : "<div class=\"vsi-modal-thumb\"></div>"}
                 <span class="vsi-modal-name">${escapeHtml(modalName(i.name))}${i.nametag ? ` <span class="vsi-modal-nametag" title="Custom name tag">“${escapeHtml(i.nametag)}”</span>` : ""}</span>
                 ${pills ? `<span class="vsi-modal-pills">${pills}</span>` : ""}
                 ${spec ? `<span class="vsi-modal-spec">${spec}</span>` : ""}
@@ -2975,13 +3039,15 @@ async function openInventoryModal(steamId: string, displayName: string) {
     const local = (await getItemsSnaps(steamId))[0];
     if (!backdrop.isConnected) return;
     if (local?.items?.length) {
+        cur = local.currency || cur; // label stored prices in the currency they were priced in
         items = local.items; total = local.total; loading = false; render();
         // Cached before floats/nametags/types existed? If it has skins but no per-item float, re-price
         // in the background and re-render with the richer data — self-heals so the next open is instant.
         const hasFloat = local.items.some(i => i.float != null);
         const hasSkin = local.items.some(i => /\((?:Factory New|Minimal Wear|Field-Tested|Well-Worn|Battle-Scarred)\)/.test(i.name));
         if (!hasFloat && hasSkin) {
-            priceSteamId(steamId).then(inv => { if (backdrop.isConnected) { items = inv.allItems; total = inv.total; render(); } }).catch(() => { /* */ });
+            // Fresh prices arrive in the CURRENT setting currency — restore it before re-rendering.
+            priceSteamId(steamId).then(inv => { if (backdrop.isConnected) { cur = settings.store.marketCurrency || 1; items = inv.allItems; total = inv.total; render(); } }).catch(() => { /* */ });
         }
         return;
     }
@@ -3241,9 +3307,7 @@ async function priceRef(userId: string | undefined, steamRef: string): Promise<I
     const cached = await cacheGetInventory(steamId, cur);
     if (cached) return { displayName, r: cached, cur, steamId, tradeUrl };
 
-    const validSources = new Set(["csfloat", "skinport", "live_steam"]);
-    const stored = settings.store.priceSource as string;
-    const source = validSources.has(stored) ? stored : "csfloat";
+    const source = resolvedPriceSource();
     const inv = await loadInventory(steamId, { source, useLiveFallback: false });
     if (inv.isPrivate) return { error: `**${displayName}**'s Steam inventory is private.` };
     cachePushInventory(steamId, { total: inv.total, priced: inv.priced, itemCount: inv.count, marketableCount: inv.marketableCount, uniqueNames: inv.uniqueNames, ts: Date.now(), source, currency: cur, topItems: inv.topItems }, displayName);
@@ -3480,6 +3544,8 @@ function migrateFromOldName() {
     try { BD.Data.save(PLUGIN_NAME, "cs2.migratedFromSIV", true); } catch { /* */ }
 }
 
+let updateCheckTimer: ReturnType<typeof setTimeout> | null = null;
+
 module.exports = class CS2Inventory {
     start() {
         try { migrateFromOldName(); } catch (e) { console.error("[VSI] migrate", e); }
@@ -3498,7 +3564,7 @@ module.exports = class CS2Inventory {
         try { registerContextMenu(); } catch (e) { console.error("[VSI] registerContextMenu", e); }
         try { startBackgroundRefresh(); } catch (e) { console.error("[VSI] startBackgroundRefresh", e); }
         try { maybePromptToken(); } catch (e) { console.error("[VSI] maybePromptToken", e); }
-        try { setTimeout(() => checkForUpdate().catch(() => { /* */ }), 8000); } catch (e) { console.error("[VSI] checkForUpdate", e); }
+        try { updateCheckTimer = setTimeout(() => checkForUpdate().catch(() => { /* */ }), 8000); } catch (e) { console.error("[VSI] checkForUpdate", e); }
         // Re-publish your trade URL each launch so it stays live in the shared cache.
         try { cachePushTradeUrl().catch(() => { /* best-effort */ }); } catch (e) { console.error("[VSI] cachePushTradeUrl", e); }
     }
@@ -3507,6 +3573,7 @@ module.exports = class CS2Inventory {
         observer?.disconnect();
         observer = null;
         stopBackgroundRefresh();
+        if (updateCheckTimer) { clearTimeout(updateCheckTimer); updateCheckTimer = null; }
         styleEl?.remove();
         styleEl = null;
         unregisterCommands();

@@ -2,7 +2,7 @@
  * @name CS2Inventory
  * @author VisaHolder
  * @description CS2 inventory value on Discord profile popouts — Doppler/Gamma phase pricing (CSFloat), FX-converted prices, and Trade Offer / Steam buttons.
- * @version 1.7.1
+ * @version 1.7.2
  * @source https://github.com/VisaHolder/cs2-inventory-betterdiscord
  * @website https://github.com/VisaHolder/cs2-inventory-betterdiscord
  */
@@ -314,7 +314,6 @@ var SelectedGuildStore;
 var SelectedChannelStore;
 var RestAPI;
 var MessageActions;
-var ComponentDispatch;
 try {
   UserStore = Webpack.getStore("UserStore");
 } catch {
@@ -337,11 +336,6 @@ try {
 }
 try {
   MessageActions = Webpack.getByKeys && Webpack.getByKeys("sendMessage", "editMessage") || Webpack.getModule((m) => typeof m?.sendMessage === "function" && typeof m?.editMessage === "function");
-} catch {
-}
-try {
-  const pick = (o) => o && typeof o.dispatchToLastSubscribed === "function" ? o : o?.ComponentDispatch && typeof o.ComponentDispatch.dispatchToLastSubscribed === "function" ? o.ComponentDispatch : null;
-  ComponentDispatch = Webpack.getByKeys && pick(Webpack.getByKeys("dispatchToLastSubscribed")) || Webpack.getByKeys && pick(Webpack.getByKeys("ComponentDispatch")) || pick(Webpack.getModule((m) => typeof m?.dispatchToLastSubscribed === "function")) || pick(Webpack.getModule((m) => m?.ComponentDispatch?.dispatchToLastSubscribed));
 } catch {
 }
 async function fetchJson(url, opts) {
@@ -404,6 +398,7 @@ function setCardEnabled(userId, on) {
   } catch {
   }
 }
+var partnerToSteam64 = (partner) => (76561197960265728n + BigInt(partner)).toString();
 async function resolveSteamRef(input) {
   let raw = input.trim().replace(/^@+/, "").replace(/\/+$/, "");
   raw = raw.replace(/^<|>$/g, "");
@@ -411,7 +406,7 @@ async function resolveSteamRef(input) {
   if (/^7656\d{13}$/.test(raw)) steamId = raw;
   if (!steamId) {
     const m = raw.match(/[?&]partner=(\d+)/);
-    if (m) steamId = (76561197960265728n + BigInt(m[1])).toString();
+    if (m) steamId = partnerToSteam64(m[1]);
   }
   if (!steamId) {
     const m = raw.match(/\/profiles\/(7656\d{13})/);
@@ -800,7 +795,7 @@ async function fetchSteamMarketPrice(marketHashName, currency) {
   try {
     const data = await fetchJson(url);
     if (!data?.success) {
-      priceMemo.set(key, { price: 0, ts: Date.now() });
+      priceMemo.set(key, { price: 0, ts: Date.now() - ttl + 5 * 6e4 });
       return 0;
     }
     const raw = data.lowest_price ?? data.median_price ?? "";
@@ -865,8 +860,7 @@ function parseTradeHold(desc) {
 function untilLabel(ts) {
   const ms = ts - Date.now();
   if (ms <= 0) return "";
-  const days = Math.ceil(ms / 864e5);
-  return days >= 1 ? `${days}d` : `${Math.ceil(ms / 36e5)}h`;
+  return ms >= 864e5 ? `${Math.ceil(ms / 864e5)}d` : `${Math.ceil(ms / 36e5)}h`;
 }
 var dopplerIconMap = null;
 var skinMetaByName = /* @__PURE__ */ new Map();
@@ -958,7 +952,11 @@ async function getCsfloatPhasePrice(marketHashName, paintIndex) {
     const resp = await fetchJson(url, { headers: { Authorization: apiKey } });
     const list = Array.isArray(resp) ? resp : resp?.data ?? [];
     const cents = list[0]?.price;
-    if (typeof cents !== "number" || cents <= 0) return null;
+    if (typeof cents !== "number" || cents <= 0) {
+      phasePriceCache.set(cacheKey, { price: null, ts: Date.now() });
+      await sleep(350);
+      return null;
+    }
     let price = cents / 100;
     const targetCode = currencyCode(cur);
     if (targetCode !== "USD") {
@@ -966,9 +964,11 @@ async function getCsfloatPhasePrice(marketHashName, paintIndex) {
       if (r > 0) price *= r;
     }
     phasePriceCache.set(cacheKey, { price, ts: Date.now() });
+    await sleep(350);
     return price;
   } catch (e) {
     console.warn("[VSI] CSFloat phase price failed for", marketHashName, paintIndex, e);
+    await sleep(350);
     return null;
   }
 }
@@ -1004,6 +1004,8 @@ async function loadInventory(steamId, opts) {
   const descriptions = [];
   const assetProps = [];
   const seenDesc = /* @__PURE__ */ new Set();
+  const seenAsset = /* @__PURE__ */ new Set();
+  let sawEmptySuccess = false;
   const token = (settings.store.steamWebApiToken || "").trim();
   const useAuth = !!token && tokenSteamId(token) === steamId;
   const urlFor = (auth, start) => auth ? `https://api.steampowered.com/IEconService/GetInventoryItemsWithDescriptions/v1/?${new URLSearchParams({ access_token: token, steamid: steamId, appid: "730", contextid: "2", get_descriptions: "true", get_asset_properties: "true", count: "2000", ...start ? { start_assetid: start } : {} })}` : `https://steamcommunity.com/inventory/${steamId}/730/2?l=english&count=2000${start ? `&start_assetid=${start}` : ""}`;
@@ -1013,8 +1015,16 @@ async function loadInventory(steamId, opts) {
     do {
       const raw = await fetchJson(urlFor(auth, start));
       const page = auth ? raw?.response ?? {} : raw;
-      if (!page?.assets || !page?.descriptions) break;
-      assets.push(...page.assets);
+      if (!page?.assets || !page?.descriptions) {
+        if (page && Number(page.total_inventory_count) === 0) sawEmptySuccess = true;
+        break;
+      }
+      for (const a of page.assets) {
+        if (!seenAsset.has(a.assetid)) {
+          seenAsset.add(a.assetid);
+          assets.push(a);
+        }
+      }
       if (Array.isArray(page.asset_properties)) assetProps.push(...page.asset_properties);
       for (const d of page.descriptions) {
         const k = `${d.classid}_${d.instanceid}`;
@@ -1023,7 +1033,7 @@ async function loadInventory(steamId, opts) {
           descriptions.push(d);
         }
       }
-      start = page.more_items ? String(page.last_assetid) : void 0;
+      start = page.more_items && page.last_assetid ? String(page.last_assetid) : void 0;
       pages++;
       if (start) await sleep(auth ? 300 : 600);
     } while (start && pages < 8);
@@ -1032,6 +1042,12 @@ async function loadInventory(steamId, opts) {
     try {
       await paginate(true);
     } catch {
+      assets.length = 0;
+      descriptions.length = 0;
+      assetProps.length = 0;
+      seenDesc.clear();
+      seenAsset.clear();
+      sawEmptySuccess = false;
     }
   }
   if (assets.length === 0) {
@@ -1042,7 +1058,7 @@ async function loadInventory(steamId, opts) {
       if (assets.length === 0) throw e;
     }
   }
-  if (assets.length === 0) return empty(true);
+  if (assets.length === 0) return empty(!sawEmptySuccess);
   const inv = { assets, descriptions };
   const floatMap = /* @__PURE__ */ new Map();
   for (const w of assetProps) {
@@ -1099,7 +1115,7 @@ async function loadInventory(steamId, opts) {
     marketableCount++;
     owned.set(meta.name, (owned.get(meta.name) ?? 0) + 1);
     const stickerSig = meta.stickers.length ? meta.stickers.slice().sort().join("|") : "";
-    const gk = `${meta.name}::${meta.phase ?? ""}::${stickerSig}`;
+    const gk = `${meta.name}::${meta.phase ?? ""}::${stickerSig}::${meta.tradable ? "" : "h"}`;
     const g = groups.get(gk);
     if (g) {
       g.qty++;
@@ -1127,7 +1143,6 @@ async function loadInventory(steamId, opts) {
     let base = null;
     if (g.phase && g.paintIndex != null && hasKey) {
       base = await getCsfloatPhasePrice(g.name, g.paintIndex);
-      await sleep(350);
     }
     if (base == null) base = priceByName.get(g.name) ?? null;
     if (base == null) continue;
@@ -1161,16 +1176,16 @@ async function loadInventory(steamId, opts) {
     return { total, priced, count: inv.assets.length, marketableCount, uniqueNames: uniqueNames.length, isPrivate: false, topItems, allItems: perItem, owned: Object.fromEntries(owned), stickerTotal, unpriced: unpriced.slice(0, 5), skippedNonMarketable };
   };
   const shouldRunLive = opts.source === "live_steam" || opts.useLiveFallback && misses.length > 0;
+  const liveCurrency = settings.store.marketCurrency || 1;
   const runFallback = async () => {
-    const currency = settings.store.marketCurrency || 1;
     const delay = Math.max(500, settings.store.requestDelayMs || 1600);
     for (let i = 0; i < misses.length; i++) {
       const name = misses[i];
       try {
-        const p = await fetchSteamMarketPrice(name, currency);
+        const p = await fetchSteamMarketPrice(name, liveCurrency);
         if (p > 0) {
           priceByName.set(name, p);
-          for (const [gk, g] of groups) if (!priceByGroup.has(gk) && !g.phase && g.name === name) priceByGroup.set(gk, p);
+          for (const [gk, g] of groups) if (!priceByGroup.has(gk) && g.name === name) priceByGroup.set(gk, p);
         }
       } catch (e) {
         if (String(e?.message || e).includes("429")) {
@@ -1227,8 +1242,15 @@ var SNAP_COALESCE_MS = 20 * 6e4;
 async function pushSnapshot(steamId, snap) {
   const list = await getSnapshots(steamId);
   const prev = list[0];
-  if (prev && snap.ts - prev.ts < SNAP_COALESCE_MS && (prev.currency || 1) === (snap.currency || 1)) list[0] = snap;
-  else list.unshift(snap);
+  if (prev && snap.ts < prev.ts) return;
+  const anchor = prev ? prev.ts0 ?? prev.ts : 0;
+  if (prev && snap.ts - anchor < SNAP_COALESCE_MS && (prev.currency || 1) === (snap.currency || 1)) {
+    snap.ts0 = anchor;
+    list[0] = snap;
+  } else {
+    snap.ts0 = snap.ts;
+    list.unshift(snap);
+  }
   await DataStore.set(snapKey(steamId), list.slice(0, 40));
 }
 var itemsKey = (steamId) => `vsi.items.${steamId}`;
@@ -1450,7 +1472,7 @@ function steamIdFromTradeUrl(tradeUrl) {
   try {
     const partner = new URL(tradeUrl).searchParams.get("partner");
     if (!partner || !/^\d+$/.test(partner)) return null;
-    return (76561197960265728n + BigInt(partner)).toString();
+    return partnerToSteam64(partner);
   } catch {
     return null;
   }
@@ -1724,10 +1746,6 @@ var BUTTON_CSS = `
 .vsi-trade-btn svg { transition: transform .15s ease; }
 .vsi-trade-btn:hover svg { transform: scale(1.06); }
 
-.vsi-trade-main { flex: 5 1 0; }
-.vsi-trade-profile { flex: 3 1 0; }
-.vsi-trade-btn:hover { transform: translateY(-1px); }
-.vsi-trade-btn:active { transform: translateY(0); filter: brightness(.92); }
 .vsi-trade-btn svg { flex-shrink: 0; }
 
 .vsi-trade-btn.blurple { background: #5865F2; color: #fff; box-shadow: 0 2px 10px rgba(88,101,242,.35); }
@@ -1992,7 +2010,7 @@ function buildButton(shownUserId, isOwn, wantTradeRow, wantCard) {
       if (t?.closest?.(".vsi-watch")) {
         e.stopPropagation();
         e.preventDefault();
-        const sid = getSteamIdSync(shownUserId);
+        const sid = card.dataset.vsiSteamId || getSteamIdSync(shownUserId);
         const snap = sid ? getSnapshotsSync(sid)[0] : null;
         if (!sid || !snap) return;
         const nm = UserStore?.getUser?.(shownUserId)?.username;
@@ -2024,10 +2042,12 @@ async function runInventoryForUser(shownUserId, onBackgroundUpdate) {
   const name = UserStore?.getUser?.(shownUserId)?.username;
   await priceSteamId(steamId, name, onBackgroundUpdate);
 }
-async function priceSteamId(steamId, name, onBackgroundUpdate, noLiveFallback = false) {
-  const validSources = /* @__PURE__ */ new Set(["csfloat", "skinport", "live_steam"]);
+var resolvedPriceSource = () => {
   const stored = settings.store.priceSource;
-  const source = validSources.has(stored) ? stored : "csfloat";
+  return (/* @__PURE__ */ new Set(["csfloat", "skinport", "live_steam"])).has(stored) ? stored : "csfloat";
+};
+async function priceSteamId(steamId, name, onBackgroundUpdate, noLiveFallback = false) {
+  const source = resolvedPriceSource();
   const useLiveFallback = !noLiveFallback && !!settings.store.useLiveSteamFallback;
   const cur = settings.store.marketCurrency || 1;
   const snapFrom = (r) => ({
@@ -2161,10 +2181,15 @@ function sparklineSvg(values, cur = 1) {
   }
   return `<svg class="vsi-spark" viewBox="0 0 ${W} ${H}"><defs><linearGradient id="${id}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${color}" stop-opacity="0.28"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs><path d="${area}" fill="url(#${id})"/><path d="${line}" fill="none" stroke="${color}" stroke-width="1.5" vector-effect="non-scaling-stroke" stroke-linecap="round" stroke-linejoin="round"/>` + markers + `<circle cx="${lx}" cy="${ly}" r="3.4" fill="${color}" opacity="0.22"/><circle cx="${lx}" cy="${ly}" r="1.7" fill="${color}"/></svg>`;
 }
+var autoRefreshAttempt = /* @__PURE__ */ new Map();
+var AUTO_REFRESH_RETRY_MS = 10 * 6e4;
 function maybeAutoRefresh(card, latest, shownUserId, isOwn) {
   if (!settings.store.autoRefreshStale || card.classList.contains("loading")) return;
   const staleH = settings.store.snapshotStalenessHours ?? 24;
   if (staleH <= 0 || Date.now() - latest.ts <= staleH * 36e5) return;
+  const last = autoRefreshAttempt.get(shownUserId) ?? 0;
+  if (Date.now() - last < AUTO_REFRESH_RETRY_MS) return;
+  autoRefreshAttempt.set(shownUserId, Date.now());
   refreshCard(card, shownUserId, isOwn).catch(() => {
   });
 }
@@ -2203,7 +2228,13 @@ function checkWatchAlerts() {
   for (const steamId of ids) {
     const e = w[steamId];
     const snap = getSnapshotsSync(steamId)[0];
-    if (!snap || (snap.currency || 1) !== e.currency) continue;
+    if (!snap) continue;
+    if ((snap.currency || 1) !== e.currency) {
+      e.currency = snap.currency || 1;
+      e.base = snap.total;
+      changed = true;
+      continue;
+    }
     if (!e.base) {
       e.base = snap.total;
       changed = true;
@@ -2405,9 +2436,9 @@ function renderPricedCard(card, latest, history, changed, steamId) {
     const d = computeDelta(latest.total, sameCurHistory, minAgeMin * 6e4);
     if (d) {
       const cls = d.delta > 0 ? "up" : d.delta < 0 ? "down" : "";
-      const sign = d.delta >= 0 ? "+" : "";
+      const sign = d.delta > 0 ? "+" : d.delta < 0 ? "\u2212" : "\xB1";
       const win = windowLabel(minAgeMin);
-      deltaHtml = `<span class="vsi-delta ${cls}" title="change over the last ${win} (nearest snapshot ${d.ago})">${sign}${fmt(d.delta, cur)} \xB7 ${win}</span>`;
+      deltaHtml = `<span class="vsi-delta ${cls}" title="change over the last ${win} (nearest snapshot ${d.ago})">${sign}${fmt(Math.abs(d.delta), cur)} \xB7 ${win}</span>`;
     }
   }
   const shortSource = latest.source === "csfloat" ? "CSFloat" : latest.source === "skinport" ? "Skinport" : latest.source === "live_steam" ? "Steam Live" : latest.source;
@@ -2430,6 +2461,7 @@ function renderPricedCard(card, latest, history, changed, steamId) {
     }
     sparkHtml = sparklineSvg(series, cur);
   }
+  if (steamId) card.dataset.vsiSteamId = steamId;
   const watched = steamId ? isWatched(steamId) : false;
   const watchBtn = steamId ? `<span class="vsi-watch${watched ? " on" : ""}" title="${watched ? "Watching \u2014 you'll get a notice on big value moves. Click to stop." : "Watch this inventory \u2014 get a notice when its value moves past your threshold."}">${watched ? "\u{1F514}" : "\u{1F515}"}</span>` : "";
   card.innerHTML = `
@@ -2838,7 +2870,7 @@ function closeInventoryModal() {
 }
 async function openInventoryModal(steamId, displayName) {
   closeInventoryModal();
-  const cur = settings.store.marketCurrency || 1;
+  let cur = settings.store.marketCurrency || 1;
   let ownerTradeUrl = null;
   const mySteamId = steamIdFromTradeUrl(settings.store.tradeUrl?.trim() || "");
   if (steamId !== mySteamId) cacheGetTradeUrl(steamId).then((u) => {
@@ -2890,7 +2922,7 @@ async function openInventoryModal(steamId, displayName) {
   let filtersSig = "";
   const renderFilters = () => {
     const present = TYPE_ORDER.filter((c) => items.some((i) => i.catType === c));
-    const rarities = [...new Set(items.map((i) => i.rarity).filter(Boolean))].sort((a, b) => (RARITY_TIERS[a]?.ord ?? 99) - (RARITY_TIERS[b]?.ord ?? 99));
+    const rarities = [...new Set(items.map((i) => i.rarity).filter(Boolean))].filter((h) => /^[0-9a-f]{3}([0-9a-f]{3})?$/i.test(h)).sort((a, b) => (RARITY_TIERS[a]?.ord ?? 99) - (RARITY_TIERS[b]?.ord ?? 99));
     const sig = present.join("|") + "::" + (typeFilter ?? "") + "::" + rarities.join("|") + "::" + (rarityFilter ?? "");
     if (sig === filtersSig) return;
     filtersSig = sig;
@@ -2959,8 +2991,8 @@ async function openInventoryModal(steamId, displayName) {
         i.seed != null && isPatternSkin(i.name) ? `<span class="vsi-modal-seed" title="paint seed / pattern">#${i.seed}</span>` : ""
       ].filter(Boolean).join("");
       return `
-            <a class="vsi-modal-row" href="${itemHref(i, steamId)}" target="_blank" rel="noopener noreferrer" data-i="${idx}" title="${clickActionLabel(i)} \xB7 right-click for more"${rarityAccent(i.rarity)}>
-                ${i.icon ? `<img class="vsi-modal-thumb" src="${steamThumb(i.icon)}" loading="lazy" />` : '<div class="vsi-modal-thumb"></div>'}
+            <a class="vsi-modal-row" href="${escapeHtml(itemHref(i, steamId))}" target="_blank" rel="noopener noreferrer" data-i="${idx}" title="${clickActionLabel(i)} \xB7 right-click for more"${rarityAccent(i.rarity)}>
+                ${i.icon ? `<img class="vsi-modal-thumb" src="${escapeHtml(steamThumb(i.icon))}" loading="lazy" />` : '<div class="vsi-modal-thumb"></div>'}
                 <span class="vsi-modal-name">${escapeHtml(modalName(i.name))}${i.nametag ? ` <span class="vsi-modal-nametag" title="Custom name tag">\u201C${escapeHtml(i.nametag)}\u201D</span>` : ""}</span>
                 ${pills ? `<span class="vsi-modal-pills">${pills}</span>` : ""}
                 ${spec ? `<span class="vsi-modal-spec">${spec}</span>` : ""}
@@ -3011,6 +3043,7 @@ async function openInventoryModal(steamId, displayName) {
   const local = (await getItemsSnaps(steamId))[0];
   if (!backdrop.isConnected) return;
   if (local?.items?.length) {
+    cur = local.currency || cur;
     items = local.items;
     total = local.total;
     loading = false;
@@ -3020,6 +3053,7 @@ async function openInventoryModal(steamId, displayName) {
     if (!hasFloat && hasSkin) {
       priceSteamId(steamId).then((inv) => {
         if (backdrop.isConnected) {
+          cur = settings.store.marketCurrency || 1;
           items = inv.allItems;
           total = inv.total;
           render();
@@ -3279,9 +3313,7 @@ async function priceRef(userId, steamRef) {
   const tradeUrl = await cacheGetTradeUrl(steamId) ?? void 0;
   const cached = await cacheGetInventory(steamId, cur);
   if (cached) return { displayName, r: cached, cur, steamId, tradeUrl };
-  const validSources = /* @__PURE__ */ new Set(["csfloat", "skinport", "live_steam"]);
-  const stored = settings.store.priceSource;
-  const source = validSources.has(stored) ? stored : "csfloat";
+  const source = resolvedPriceSource();
   const inv = await loadInventory(steamId, { source, useLiveFallback: false });
   if (inv.isPrivate) return { error: `**${displayName}**'s Steam inventory is private.` };
   cachePushInventory(steamId, { total: inv.total, priced: inv.priced, itemCount: inv.count, marketableCount: inv.marketableCount, uniqueNames: inv.uniqueNames, ts: Date.now(), source, currency: cur, topItems: inv.topItems }, displayName);
@@ -3532,6 +3564,7 @@ function migrateFromOldName() {
   } catch {
   }
 }
+var updateCheckTimer = null;
 module.exports = class CS2Inventory {
   start() {
     try {
@@ -3583,7 +3616,7 @@ module.exports = class CS2Inventory {
       console.error("[VSI] maybePromptToken", e);
     }
     try {
-      setTimeout(() => checkForUpdate().catch(() => {
+      updateCheckTimer = setTimeout(() => checkForUpdate().catch(() => {
       }), 8e3);
     } catch (e) {
       console.error("[VSI] checkForUpdate", e);
@@ -3599,6 +3632,10 @@ module.exports = class CS2Inventory {
     observer?.disconnect();
     observer = null;
     stopBackgroundRefresh();
+    if (updateCheckTimer) {
+      clearTimeout(updateCheckTimer);
+      updateCheckTimer = null;
+    }
     styleEl?.remove();
     styleEl = null;
     unregisterCommands();
