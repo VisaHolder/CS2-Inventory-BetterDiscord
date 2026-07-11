@@ -2,7 +2,7 @@
  * @name CS2Inventory
  * @author VisaHolder
  * @description CS2 inventory value on Discord profile popouts — Doppler/Gamma phase pricing (CSFloat), FX-converted prices, and Trade Offer / Steam buttons.
- * @version 1.7.3
+ * @version 1.7.4
  * @source https://github.com/VisaHolder/cs2-inventory-betterdiscord
  * @website https://github.com/VisaHolder/cs2-inventory-betterdiscord
  */
@@ -977,13 +977,20 @@ function base64UrlDecode(s) {
   while (s.length % 4) s += "=";
   return atob(s);
 }
-function tokenSteamId(token) {
+function tokenPayload(token) {
   try {
-    const p = JSON.parse(base64UrlDecode(token.split(".")[1] || ""));
-    return typeof p?.sub === "string" ? p.sub : null;
+    return JSON.parse(base64UrlDecode(token.split(".")[1] || ""));
   } catch {
     return null;
   }
+}
+function tokenSteamId(token) {
+  const p = tokenPayload(token);
+  return typeof p?.sub === "string" ? p.sub : null;
+}
+function tokenExpired(token) {
+  const exp = tokenPayload(token)?.exp;
+  return typeof exp === "number" && Date.now() / 1e3 > exp;
 }
 async function loadInventory(steamId, opts) {
   const empty = (isPriv) => ({
@@ -1007,7 +1014,9 @@ async function loadInventory(steamId, opts) {
   const seenAsset = /* @__PURE__ */ new Set();
   let sawEmptySuccess = false;
   const token = (settings.store.steamWebApiToken || "").trim();
-  const useAuth = !!token && tokenSteamId(token) === steamId;
+  const tokenIsOurs = !!token && tokenSteamId(token) === steamId;
+  if (tokenIsOurs && tokenExpired(token)) warnExpiredToken();
+  const useAuth = tokenIsOurs && !tokenExpired(token);
   const urlFor = (auth, start) => auth ? `https://api.steampowered.com/IEconService/GetInventoryItemsWithDescriptions/v1/?${new URLSearchParams({ access_token: token, steamid: steamId, appid: "730", contextid: "2", get_descriptions: "true", get_asset_properties: "true", count: "2000", ...start ? { start_assetid: start } : {} })}` : `https://steamcommunity.com/inventory/${steamId}/730/2?l=english&count=2000${start ? `&start_assetid=${start}` : ""}`;
   const paginate = async (auth) => {
     let start;
@@ -2403,6 +2412,31 @@ function maybePromptToken() {
     console.error("[VSI] token prompt", e);
   }
 }
+var expiredTokenWarned = false;
+function warnExpiredToken() {
+  if (expiredTokenWarned) return;
+  expiredTokenWarned = true;
+  try {
+    if (!BD.UI?.showNotice) {
+      try {
+        BD.UI?.showToast?.("Steam token expired \u2014 re-paste it to show your knives/gloves.", { type: "error" });
+      } catch {
+      }
+      return;
+    }
+    const close = BD.UI.showNotice(
+      "CS2 Inventory: your Steam token expired (they last ~24h), so your trade-held knives & gloves are hidden. Grab a fresh one and paste it into the Steam Web Api Token setting.",
+      { type: "warning", buttons: [{ label: "Get a fresh token", onClick: () => openProtocol(TOKEN_URL) }, { label: "Dismiss", onClick: () => {
+        try {
+          close?.();
+        } catch {
+        }
+      } }] }
+    );
+  } catch (e) {
+    console.error("[VSI] expired token warn", e);
+  }
+}
 function rarityDotHtml(color) {
   if (!color || !/^[0-9a-f]{3}([0-9a-f]{3})?$/i.test(color)) return "";
   return `<span class="vsi-rdot" style="background:#${color}"></span>`;
@@ -3222,7 +3256,15 @@ function buildSettingsPanel() {
       if (id === "tradeUrl" || id === "useSharedCache" || id === "shareTradeUrl") cachePushTradeUrl().catch(() => {
       });
       if (id === "steamWebApiToken" && typeof value === "string" && value.trim()) {
-        const sid = tokenSteamId(value.trim());
+        const t = value.trim();
+        expiredTokenWarned = false;
+        if (tokenExpired(t)) {
+          try {
+            BD.UI?.showToast?.("That token is already expired \u2014 grab a fresh one.", { type: "error" });
+          } catch {
+          }
+        }
+        const sid = tokenSteamId(t);
         if (sid) priceSteamId(sid).then(() => {
           try {
             BD.UI?.showToast?.("Loaded your full inventory (held items included).", { type: "success" });
@@ -3614,6 +3656,11 @@ module.exports = class CS2Inventory {
       maybePromptToken();
     } catch (e) {
       console.error("[VSI] maybePromptToken", e);
+    }
+    try {
+      const t = (settings.store.steamWebApiToken || "").trim();
+      if (t && tokenExpired(t)) warnExpiredToken();
+    } catch {
     }
     try {
       updateCheckTimer = setTimeout(() => checkForUpdate().catch(() => {

@@ -766,8 +766,19 @@ function base64UrlDecode(s: string): string {
     while (s.length % 4) s += "=";
     return atob(s);
 }
+function tokenPayload(token: string): any {
+    try { return JSON.parse(base64UrlDecode(token.split(".")[1] || "")); } catch { return null; }
+}
 function tokenSteamId(token: string): string | null {
-    try { const p = JSON.parse(base64UrlDecode(token.split(".")[1] || "")); return typeof p?.sub === "string" ? p.sub : null; } catch { return null; }
+    const p = tokenPayload(token);
+    return typeof p?.sub === "string" ? p.sub : null;
+}
+// webapi_tokens live ~24h. An expired one 401s the authed endpoint, which silently falls back to the
+// PUBLIC inventory — hiding trade-held knives/gloves. Decode `exp` so we can skip a dead token and,
+// more importantly, TELL the user to re-paste instead of quietly dropping their held items.
+function tokenExpired(token: string): boolean {
+    const exp = tokenPayload(token)?.exp;
+    return typeof exp === "number" && Date.now() / 1000 > exp;
 }
 
 async function loadInventory(steamId: string, opts: PricingOptions): Promise<InventoryResult> {
@@ -792,7 +803,11 @@ async function loadInventory(steamId: string, opts: PricingOptions): Promise<Inv
     // endpoint hides from anonymous viewers. Everyone else (and if the token is missing/expired)
     // uses the public endpoint. Both paginate the same way (more_items / last_assetid).
     const token = (settings.store.steamWebApiToken || "").trim();
-    const useAuth = !!token && tokenSteamId(token) === steamId;
+    // Only use the token if it's ours AND not expired — an expired one just 401s and wastes a request
+    // before falling back to public. When it IS expired for our own inventory, nudge the user (once).
+    const tokenIsOurs = !!token && tokenSteamId(token) === steamId;
+    if (tokenIsOurs && tokenExpired(token)) warnExpiredToken();
+    const useAuth = tokenIsOurs && !tokenExpired(token);
     const urlFor = (auth: boolean, start?: string): string => auth
         ? `https://api.steampowered.com/IEconService/GetInventoryItemsWithDescriptions/v1/?${new URLSearchParams({ access_token: token, steamid: steamId, appid: "730", contextid: "2", get_descriptions: "true", get_asset_properties: "true", count: "2000", ...(start ? { start_assetid: start } : {}) })}`
         : `https://steamcommunity.com/inventory/${steamId}/730/2?l=english&count=2000${start ? `&start_assetid=${start}` : ""}`;
@@ -2296,6 +2311,21 @@ function maybePromptToken() {
     } catch (e) { console.error("[VSI] token prompt", e); }
 }
 
+// Fired when your OWN inventory is priced with a set-but-EXPIRED token: the held items (knives,
+// gloves) silently dropped to the public view. Nudge to re-paste. Once per session to avoid spam.
+let expiredTokenWarned = false;
+function warnExpiredToken() {
+    if (expiredTokenWarned) return;
+    expiredTokenWarned = true;
+    try {
+        if (!BD.UI?.showNotice) { try { BD.UI?.showToast?.("Steam token expired — re-paste it to show your knives/gloves.", { type: "error" }); } catch { /* */ } return; }
+        const close = BD.UI.showNotice(
+            "CS2 Inventory: your Steam token expired (they last ~24h), so your trade-held knives & gloves are hidden. Grab a fresh one and paste it into the Steam Web Api Token setting.",
+            { type: "warning", buttons: [{ label: "Get a fresh token", onClick: () => openProtocol(TOKEN_URL) }, { label: "Dismiss", onClick: () => { try { close?.(); } catch { /* */ } } }] },
+        );
+    } catch (e) { console.error("[VSI] expired token warn", e); }
+}
+
 // A small rarity dot in the item's CS2 grade color, if we know it (hex from Steam's name_color).
 function rarityDotHtml(color?: string): string {
     if (!color || !/^[0-9a-f]{3}([0-9a-f]{3})?$/i.test(color)) return "";
@@ -3209,7 +3239,10 @@ function buildSettingsPanel(): any {
             if (id === "tradeUrl" || id === "useSharedCache" || id === "shareTradeUrl") cachePushTradeUrl().catch(() => { /* best-effort */ });
             // Paste a webapi_token → re-price your own inventory so trade-held items (gloves/knives) appear.
             if (id === "steamWebApiToken" && typeof value === "string" && value.trim()) {
-                const sid = tokenSteamId(value.trim());
+                const t = value.trim();
+                expiredTokenWarned = false; // fresh paste — let a future expiry warn again
+                if (tokenExpired(t)) { try { BD.UI?.showToast?.("That token is already expired — grab a fresh one.", { type: "error" }); } catch { /* */ } }
+                const sid = tokenSteamId(t);
                 if (sid) priceSteamId(sid)
                     .then(() => { try { BD.UI?.showToast?.("Loaded your full inventory (held items included).", { type: "success" }); } catch { /* */ } })
                     .catch(() => { try { BD.UI?.showToast?.("Couldn't load — token may be invalid or expired.", { type: "error" }); } catch { /* */ } });
@@ -3564,6 +3597,8 @@ module.exports = class CS2Inventory {
         try { registerContextMenu(); } catch (e) { console.error("[VSI] registerContextMenu", e); }
         try { startBackgroundRefresh(); } catch (e) { console.error("[VSI] startBackgroundRefresh", e); }
         try { maybePromptToken(); } catch (e) { console.error("[VSI] maybePromptToken", e); }
+        // If a token is set but already expired, say so up front — otherwise held items just silently vanish.
+        try { const t = (settings.store.steamWebApiToken || "").trim(); if (t && tokenExpired(t)) warnExpiredToken(); } catch { /* */ }
         try { updateCheckTimer = setTimeout(() => checkForUpdate().catch(() => { /* */ }), 8000); } catch (e) { console.error("[VSI] checkForUpdate", e); }
         // Re-publish your trade URL each launch so it stays live in the shared cache.
         try { cachePushTradeUrl().catch(() => { /* best-effort */ }); } catch (e) { console.error("[VSI] cachePushTradeUrl", e); }
